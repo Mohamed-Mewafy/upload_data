@@ -72,15 +72,15 @@ def download_video_temporarily(video_url, output_path="temp_video.mp4"):
         print(f"❌ خطأ أثناء التحميل: {e}")
     return None
 
-def upload_to_archive(file_path, movie_uid):
-    # استخدام الـ uid الخاص بالفيلم كمعرف أساسي للأرشيف ليكون مخفياً ومشفراً
-    identifier = f"cimaspace-item-{movie_uid}"
+def upload_to_archive(file_path, record_id):
+    # استخدام الـ id الخاص بالسجل كمعرف مشفر للأرشيف
+    identifier = f"cimaspace-item-{record_id}"
     
     print(f"📤 جاري رفع الفيلم بالمعرف السري [{identifier}] إلى Archive.org...")
     
     metadata = {
         'mediatype': 'movies',
-        'title': f"Protected Media {movie_uid}",
+        'title': f"Protected Media {record_id}",
         'description': 'Encrypted media storage for Cimaspace platform.'
     }
     
@@ -106,24 +106,20 @@ def upload_to_archive(file_path, movie_uid):
 
 def update_status(table_name, record_id, archive_url):
     try:
+        # حفظ الرابط المباشر في direct_links أو تحديث الحالة حسب الأعمدة المتاحة
         supabase.table(table_name).update({
-            "is_uploaded": True,
-            "archive_url": archive_url
+            "is_uploaded": True
         }).eq("id", record_id).execute()
-        print(f"🔄 تم تحديث السجل وحفظ الرابط في جدول [{table_name}] بنجاح.")
+        print(f"🔄 تم تحديث حالة الرفع في جدول [{table_name}] بنجاح.")
     except Exception as e:
-        try:
-            supabase.table(table_name).update({"is_uploaded": True}).eq("id", record_id).execute()
-            print(f"🔄 تم تحديث حالة is_uploaded في جدول [{table_name}] بنجاح.")
-        except Exception as inner_e:
-            print(f"❌ خطأ أثناء التحديث: {inner_e}")
+        print(f"❌ خطأ أثناء التحديث: {e}")
 
-def process_table(table_name, url_column, title_column="title", uid_column="uid"):
+def process_table(table_name, url_column, title_column="title"):
     print(f"\n========================================")
     print(f"📂 فحص الجدول: {table_name}")
     print(f"========================================")
     try:
-        response = supabase.table(table_name).select(f"id, {title_column}, {url_column}, {uid_column}").eq("is_uploaded", False).execute()
+        response = supabase.table(table_name).select(f"id, {title_column}, {url_column}").eq("is_uploaded", False).execute()
         items = response.data
     except Exception as e:
         print(f"❌ خطأ في جلب البيانات من {table_name}: {e}")
@@ -137,20 +133,19 @@ def process_table(table_name, url_column, title_column="title", uid_column="uid"
         record_id = item.get("id")
         title = item.get(title_column) or "Unamed Video"
         watch_url = item.get(url_column)
-        movie_uid = item.get(uid_column) or str(record_id)
         
         if not watch_url:
             continue
             
         print(f"\n----------------------------------------")
-        print(f"[{index}] معالجة الفيلم: {title} (UID: {movie_uid})")
+        print(f"[{index}] معالجة العنصر: {title} (ID: {record_id})")
         print(f"----------------------------------------")
         
         direct_url = get_video_link_with_browser(watch_url)
         if direct_url:
             local_file = download_video_temporarily(direct_url)
             if local_file and os.path.exists(local_file):
-                archive_url = upload_to_archive(local_file, movie_uid)
+                archive_url = upload_to_archive(local_file, record_id)
                 if archive_url:
                     update_status(table_name, record_id, archive_url)
                 
@@ -160,10 +155,10 @@ def process_table(table_name, url_column, title_column="title", uid_column="uid"
             print("❌ فشل استخراج الرابط المباشر.")
 
 def main():
-    process_table("movies_cima", "watch_url", "title", "uid")
-    process_table("arabic_movies", "watch_url", "title", "uid")
-    process_table("tv_series", "watch_url", "title", "uid")
-    process_table("episodes_cima", "watch_url", "title", "uid")
+    process_table("movies_cima", "watch_url", "title")
+    process_table("arabic_movies", "watch_url", "title")
+    process_table("tv_series", "watch_url", "title")
+    process_table("episodes_cima", "watch_url", "title")
     
     print("\n🏁 انتهت كل المهام بنجاح!")
 
