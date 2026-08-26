@@ -23,7 +23,6 @@ def get_video_link_with_browser(embed_url):
     extracted_url = None
     
     with sync_playwright() as p:
-        # تشغيل المتصفح مع تفعيل العرض الوهمي لكن مع إعدادات تتخطى الحظر
         browser = p.chromium.launch(
             headless=True,
             args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox"]
@@ -37,47 +36,33 @@ def get_video_link_with_browser(embed_url):
         
         def check_url(url):
             nonlocal extracted_url
-            # البحث عن الامتدادات الشهيرة وتجنب الروابط الإعلانية التافهة
             if any(ext in url.lower() for ext in ['.m3u8', '.mp4', '.ts', 'video/mp4']) and 'chunk' not in url and 'ads' not in url:
                 if not extracted_url:
                     extracted_url = url
                     print(f"🎯 تم صيد الرابط المباشر بنجاح: {url}", flush=True)
 
-        # مراقبة طلبات واستجابات الشبكة معاً
         page.on("request", lambda req: check_url(req.url))
         page.on("response", lambda res: check_url(res.url))
         
         try:
-            # الانتقال للصفحة مع السماح بوقت كافٍ للتحميل
             page.goto(embed_url, timeout=45000, wait_until="domcontentloaded")
-            
-            # محاولة النقر في منتصف الصفحة أو على أي زر تشغيل لتنشيط الفيديو
-            for i in range(3):
+            for i in range(4):
                 try:
-                    # النقر في منتصف الشاشة (مكان زر التشغيل الافتراضي في أغلب سيرفرات الرفع)
+                    page.evaluate("""() => {
+                        const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play"], .jw-display-icon-container');
+                        elements.forEach(el => el.click());
+                    }""")
+                except:
+                    pass
+                
+                try:
                     page.mouse.click(640, 360)
                 except:
                     pass
                 
-                # البحث عن محددات أزرار التشغيل الشائعة في Mixdrop و Hgcloud وغيرها
-                selectors = [
-                    "video", ".play-btn", ".jw-display-icon-container", 
-                    "#vplayer", ".vjs-big-play-button", ".play_btn", 
-                    "div[id*='player']", "div[class*='play']"
-                ]
-                for selector in selectors:
-                    try:
-                        element = page.locator(selector).first
-                        if element.count() > 0 and element.is_visible():
-                            element.click(timeout=1000)
-                            print(f"🖱️ تم النقر على العنصر: {selector}", flush=True)
-                    except:
-                        pass
-                
-                time.sleep(3)
+                time.sleep(4)
                 if extracted_url:
                     break
-                    
         except Exception as e:
             print(f"⚠️ خطأ أثناء تصفح الصفحة: {e}", flush=True)
             
@@ -94,7 +79,17 @@ def download_video_temporarily(video_url, output_path="temp_video.mp4"):
                 for chunk in response.iter_content(chunk_size=1024*1024):
                     if chunk:
                         f.write(chunk)
-            print("✅ تم التحميل المؤقت بنجاح.", flush=True)
+            
+            # التحقق من حجم الملف المنزل للتأكد أنه ليس ملف وهمي أو خطأ
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"📦 حجم الملف المنزل: {file_size_mb:.2f} MB", flush=True)
+            
+            if file_size_mb < 2:  # إذا كان حجم الملف أقل من 2 ميجا، فهذا يعني أنه ليس فيلماً بل صفحة خطأ أو كود تالف
+                print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، غالباً الرابط غير مباشر أو تالف.", flush=True)
+                os.remove(output_path)
+                return None
+                
+            print("✅ تم التحقق والتحميل المؤقت بنجاح.", flush=True)
             return output_path
         else:
             print(f"❌ فشل التحميل، كود الاستجابة: {response.status_code}", flush=True)
@@ -103,12 +98,14 @@ def download_video_temporarily(video_url, output_path="temp_video.mp4"):
     return None
 
 def upload_to_archive(file_path, record_id):
-    identifier = f"cimaspace-item-{record_id}"
+    identifier = f"cimaspace-movie-{record_id}"
     print(f"📤 جاري رفع الفيلم بالمعرف [{identifier}] إلى Archive.org...", flush=True)
     
+    # فرض تحديد نوع الوسائط كأفلام صراحةً
     metadata = {
         'mediatype': 'movies',
-        'title': f"Protected Media {record_id}",
+        'collection': 'movies',
+        'title': f"CimaSpace Media {record_id}",
         'description': 'Encrypted media storage for Cimaspace platform.'
     }
     
@@ -123,7 +120,7 @@ def upload_to_archive(file_path, record_id):
         
         if r and r[0].status_code == 200:
             archive_download_url = f"https://archive.org/download/{identifier}/temp_video.mp4"
-            print(f"✅ تم الرفع بنجاح! الرابط: {archive_download_url}", flush=True)
+            print(f"✅ تم الرفع بنجاح كفيديو! الرابط: {archive_download_url}", flush=True)
             return archive_download_url
         else:
             print(f"⚠️ فشل الرفع للأرشيف.", flush=True)
