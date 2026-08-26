@@ -8,13 +8,11 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# قراءة متغيرات البيئة بأمان من GitHub Secrets
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-# التحقق من صحة الرابط قبل الاتصال
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
     raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}", flush=True)
 
@@ -25,32 +23,61 @@ def get_video_link_with_browser(embed_url):
     extracted_url = None
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # تشغيل المتصفح مع تفعيل العرض الوهمي لكن مع إعدادات تتخطى الحظر
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox"]
+        )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            extra_http_headers={"Referer": "https://cimaspace.site/"}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            extra_http_headers={"Referer": "https://cimaspace.site/"},
+            viewport={"width": 1280, "height": 720}
         )
         page = context.new_page()
         
-        def intercept_response(response):
+        def check_url(url):
             nonlocal extracted_url
-            url = response.url
-            if any(ext in url for ext in ['.m3u8', '.mp4', '.ts']) and 'chunk' not in url:
+            # البحث عن الامتدادات الشهيرة وتجنب الروابط الإعلانية التافهة
+            if any(ext in url.lower() for ext in ['.m3u8', '.mp4', '.ts', 'video/mp4']) and 'chunk' not in url and 'ads' not in url:
                 if not extracted_url:
                     extracted_url = url
-                    print(f"🎯 تم صيد الرابط المباشر: {url}", flush=True)
+                    print(f"🎯 تم صيد الرابط المباشر بنجاح: {url}", flush=True)
 
-        page.on("response", intercept_response)
+        # مراقبة طلبات واستجابات الشبكة معاً
+        page.on("request", lambda req: check_url(req.url))
+        page.on("response", lambda res: check_url(res.url))
         
         try:
-            page.goto(embed_url, timeout=35000)
-            for selector in ["video", ".play-btn", ".jw-display-icon-container", "#vplayer", ".vjs-big-play-button"]:
+            # الانتقال للصفحة مع السماح بوقت كافٍ للتحميل
+            page.goto(embed_url, timeout=45000, wait_until="domcontentloaded")
+            
+            # محاولة النقر في منتصف الصفحة أو على أي زر تشغيل لتنشيط الفيديو
+            for i in range(3):
                 try:
-                    if page.locator(selector).count() > 0:
-                        page.click(selector, timeout=2000)
+                    # النقر في منتصف الشاشة (مكان زر التشغيل الافتراضي في أغلب سيرفرات الرفع)
+                    page.mouse.click(640, 360)
                 except:
                     pass
-            time.sleep(6)
+                
+                # البحث عن محددات أزرار التشغيل الشائعة في Mixdrop و Hgcloud وغيرها
+                selectors = [
+                    "video", ".play-btn", ".jw-display-icon-container", 
+                    "#vplayer", ".vjs-big-play-button", ".play_btn", 
+                    "div[id*='player']", "div[class*='play']"
+                ]
+                for selector in selectors:
+                    try:
+                        element = page.locator(selector).first
+                        if element.count() > 0 and element.is_visible():
+                            element.click(timeout=1000)
+                            print(f"🖱️ تم النقر على العنصر: {selector}", flush=True)
+                    except:
+                        pass
+                
+                time.sleep(3)
+                if extracted_url:
+                    break
+                    
         except Exception as e:
             print(f"⚠️ خطأ أثناء تصفح الصفحة: {e}", flush=True)
             
@@ -60,7 +87,8 @@ def get_video_link_with_browser(embed_url):
 def download_video_temporarily(video_url, output_path="temp_video.mp4"):
     print(f"📥 جاري تحميل الفيديو مؤقتاً لمعالجته...", flush=True)
     try:
-        response = requests.get(video_url, stream=True, timeout=60, verify=False)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(video_url, headers=headers, stream=True, timeout=60, verify=False)
         if response.status_code == 200:
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=1024*1024):
@@ -68,14 +96,15 @@ def download_video_temporarily(video_url, output_path="temp_video.mp4"):
                         f.write(chunk)
             print("✅ تم التحميل المؤقت بنجاح.", flush=True)
             return output_path
+        else:
+            print(f"❌ فشل التحميل، كود الاستجابة: {response.status_code}", flush=True)
     except Exception as e:
         print(f"❌ خطأ أثناء التحميل: {e}", flush=True)
     return None
 
 def upload_to_archive(file_path, record_id):
     identifier = f"cimaspace-item-{record_id}"
-    
-    print(f"📤 جاري رفع الفيلم بالمعرف السري [{identifier}] إلى Archive.org...", flush=True)
+    print(f"📤 جاري رفع الفيلم بالمعرف [{identifier}] إلى Archive.org...", flush=True)
     
     metadata = {
         'mediatype': 'movies',
@@ -94,7 +123,7 @@ def upload_to_archive(file_path, record_id):
         
         if r and r[0].status_code == 200:
             archive_download_url = f"https://archive.org/download/{identifier}/temp_video.mp4"
-            print(f"✅ تم الرفع بنجاح! الرابط المشفر: {archive_download_url}", flush=True)
+            print(f"✅ تم الرفع بنجاح! الرابط: {archive_download_url}", flush=True)
             return archive_download_url
         else:
             print(f"⚠️ فشل الرفع للأرشيف.", flush=True)
