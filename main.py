@@ -8,14 +8,17 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# قراءة البيانات بأمان من بيئة جيت هب
+# قراءة متغيرات البيئة بأمان من GitHub Secrets
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
+# التحقق من صحة الرابط قبل الاتصال
+if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
+    raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def get_video_link_with_browser(embed_url):
     print(f"🌐 فتح المتصفح الوهمي لفحص الرابط: {embed_url}")
@@ -69,15 +72,15 @@ def download_video_temporarily(video_url, output_path="temp_video.mp4"):
         print(f"❌ خطأ أثناء التحميل: {e}")
     return None
 
-def upload_to_archive(file_path, media_title, movie_uid):
-    # استخدام الـ uid الخاص بالفيلم كمعرف أساسي للأرشيف ليكون مشفراً ومخفياً
+def upload_to_archive(file_path, movie_uid):
+    # استخدام الـ uid الخاص بالفيلم كمعرف أساسي للأرشيف ليكون مخفياً ومشفراً
     identifier = f"cimaspace-item-{movie_uid}"
     
     print(f"📤 جاري رفع الفيلم بالمعرف السري [{identifier}] إلى Archive.org...")
     
     metadata = {
         'mediatype': 'movies',
-        'title': f"Protected Media {movie_uid}", # إخفاء العنوان الحقيقي في الأرشيف أيضاً
+        'title': f"Protected Media {movie_uid}",
         'description': 'Encrypted media storage for Cimaspace platform.'
     }
     
@@ -91,9 +94,7 @@ def upload_to_archive(file_path, media_title, movie_uid):
         )
         
         if r and r[0].status_code == 200:
-            # استخراج اسم الملف الفعلي المرفوع
-            file_name = os.path.basename(file_path)
-            archive_download_url = f"https://archive.org/download/{identifier}/{file_name}"
+            archive_download_url = f"https://archive.org/download/{identifier}/temp_video.mp4"
             print(f"✅ تم الرفع بنجاح! الرابط المشفر: {archive_download_url}")
             return archive_download_url
         else:
@@ -122,7 +123,6 @@ def process_table(table_name, url_column, title_column="title", uid_column="uid"
     print(f"📂 فحص الجدول: {table_name}")
     print(f"========================================")
     try:
-        # جلب الـ id والـ title والـ watch_url ومعرف الـ uid الخاص بالفيلم
         response = supabase.table(table_name).select(f"id, {title_column}, {url_column}, {uid_column}").eq("is_uploaded", False).execute()
         items = response.data
     except Exception as e:
@@ -137,7 +137,7 @@ def process_table(table_name, url_column, title_column="title", uid_column="uid"
         record_id = item.get("id")
         title = item.get(title_column) or "Unamed Video"
         watch_url = item.get(url_column)
-        movie_uid = item.get(uid_column) or str(record_id) # استخدام الـ uid أو الـ id كبديل احتياطي
+        movie_uid = item.get(uid_column) or str(record_id)
         
         if not watch_url:
             continue
@@ -150,11 +150,12 @@ def process_table(table_name, url_column, title_column="title", uid_column="uid"
         if direct_url:
             local_file = download_video_temporarily(direct_url)
             if local_file and os.path.exists(local_file):
-                archive_url = upload_to_archive(local_file, title, movie_uid)
+                archive_url = upload_to_archive(local_file, movie_uid)
                 if archive_url:
                     update_status(table_name, record_id, archive_url)
                 
-                os.remove(local_file)
+                if os.path.exists(local_file):
+                    os.remove(local_file)
         else:
             print("❌ فشل استخراج الرابط المباشر.")
 
