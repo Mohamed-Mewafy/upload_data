@@ -1,7 +1,7 @@
 name: CimaSpace Auto Uploader
 
 on:
-  workflow_dispatch: # يتيح لك تشغيله يدوياً متى شئت بضغطة زر من جيتهب
+  workflow_dispatch: # يتيح لك التشغيل اليدوي بضغطة زر من GitHub
   schedule:
     - cron: '0 */6 * * *' # يعمل تلقائياً كل 6 ساعات
 
