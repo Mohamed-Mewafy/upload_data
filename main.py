@@ -25,7 +25,12 @@ def get_video_link_with_browser(embed_url):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox"]
+            args=[
+                "--disable-dev-shm-usage", 
+                "--no-sandbox", 
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled" # مهم جداً لتجاوز كشف المتصفحات الوهمية
+            ]
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -36,7 +41,8 @@ def get_video_link_with_browser(embed_url):
         
         def check_url(url):
             nonlocal extracted_url
-            if any(ext in url.lower() for ext in ['.m3u8', '.mp4', '.ts', 'video/mp4']) and 'chunk' not in url and 'ads' not in url:
+            # استهداف الروابط الحقيقية وتجنب ملفات الـ ts الصغيرة أو إعلانات الـ chunk
+            if any(ext in url.lower() for ext in ['.m3u8', '.mp4', 'video/mp4']) and 'chunk' not in url and 'ads' not in url and 'seg' not in url:
                 if not extracted_url:
                     extracted_url = url
                     print(f"🎯 تم صيد الرابط المباشر بنجاح: {url}", flush=True)
@@ -49,7 +55,7 @@ def get_video_link_with_browser(embed_url):
             for i in range(4):
                 try:
                     page.evaluate("""() => {
-                        const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play"], .jw-display-icon-container');
+                        const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play"], .jw-display-icon-container, iframe');
                         elements.forEach(el => el.click());
                     }""")
                 except:
@@ -60,7 +66,7 @@ def get_video_link_with_browser(embed_url):
                 except:
                     pass
                 
-                time.sleep(4)
+                time.sleep(5)
                 if extracted_url:
                     break
         except Exception as e:
@@ -69,44 +75,50 @@ def get_video_link_with_browser(embed_url):
         browser.close()
     return extracted_url
 
-def download_video_temporarily(video_url, output_path="temp_video.mp4"):
+def download_video_temporarily(video_url, record_id, output_dir="."):
+    output_path = os.path.join(output_dir, f"{record_id}.mp4")
     print(f"📥 جاري تحميل الفيديو مؤقتاً لمعالجته...", flush=True)
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(video_url, headers=headers, stream=True, timeout=60, verify=False)
+        response = requests.get(video_url, headers=headers, stream=True, timeout=120, verify=False)
+        
         if response.status_code == 200:
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=1024*1024):
                     if chunk:
                         f.write(chunk)
             
-            # التحقق من حجم الملف المنزل للتأكد أنه ليس ملف وهمي أو خطأ
-            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"📦 حجم الملف المنزل: {file_size_mb:.2f} MB", flush=True)
-            
-            if file_size_mb < 2:  # إذا كان حجم الملف أقل من 2 ميجا، فهذا يعني أنه ليس فيلماً بل صفحة خطأ أو كود تالف
-                print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، غالباً الرابط غير مباشر أو تالف.", flush=True)
-                os.remove(output_path)
-                return None
+            if os.path.exists(output_path):
+                file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"📦 حجم الملف المنزل: {file_size_mb:.2f} MB", flush=True)
                 
-            print("✅ تم التحقق والتحميل المؤقت بنجاح.", flush=True)
-            return output_path
+                # رفع الحد الأدنى إلى 10 ميجا للتأكد أنه فيلم مش فيديو ثانية واحدة أو صفحة خطأ
+                if file_size_mb < 10:  
+                    print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، غالباً الرابط تالف أو جيت هب تم حظره.", flush=True)
+                    os.remove(output_path)
+                    return None
+                    
+                print("✅ تم التحقق والتحميل المؤقت بنجاح.", flush=True)
+                return output_path
         else:
             print(f"❌ فشل التحميل، كود الاستجابة: {response.status_code}", flush=True)
     except Exception as e:
         print(f"❌ خطأ أثناء التحميل: {e}", flush=True)
+    
+    if os.path.exists(output_path):
+        os.remove(output_path)
     return None
 
 def upload_to_archive(file_path, record_id):
-    identifier = f"cimaspace-movie-{record_id}"
-    print(f"📤 جاري رفع الفيلم بالمعرف [{identifier}] إلى Archive.org...", flush=True)
+    identifier = f"cimaspace-item-{record_id}"
+    file_name = f"{record_id}.mp4"
+    print(f"📤 جاري رفع الملف بالمعرف العشوائي [{identifier}] إلى Archive.org...", flush=True)
     
-    # فرض تحديد نوع الوسائط كأفلام صراحةً
     metadata = {
         'mediatype': 'movies',
         'collection': 'movies',
-        'title': f"CimaSpace Media {record_id}",
-        'description': 'Encrypted media storage for Cimaspace platform.'
+        'title': f"Media Item {record_id}",
+        'description': 'Encrypted media storage.'
     }
     
     try:
@@ -119,8 +131,8 @@ def upload_to_archive(file_path, record_id):
         )
         
         if r and r[0].status_code == 200:
-            archive_download_url = f"https://archive.org/download/{identifier}/temp_video.mp4"
-            print(f"✅ تم الرفع بنجاح كفيديو! الرابط: {archive_download_url}", flush=True)
+            archive_download_url = f"https://archive.org/download/{identifier}/{file_name}"
+            print(f"✅ تم الرفع بنجاح! الرابط: {archive_download_url}", flush=True)
             return archive_download_url
         else:
             print(f"⚠️ فشل الرفع للأرشيف.", flush=True)
@@ -129,12 +141,13 @@ def upload_to_archive(file_path, record_id):
         print(f"❌ خطأ أثناء الرفع: {e}", flush=True)
         return None
 
-def update_status(table_name, record_id):
+def update_status(table_name, record_id, archive_url):
     try:
         supabase.table(table_name).update({
-            "is_uploaded": True
+            "is_uploaded": True,
+            "watch_url": archive_url # تحديث اللينك القديم باللينك المباشر الجديد في سوبابيز تلقائياً
         }).eq("id", record_id).execute()
-        print(f"🔄 تم تحديث حالة الرفع في جدول [{table_name}] بنجاح.", flush=True)
+        print(f"🔄 تم تحديث حالة الرفع والرابط في جدول [{table_name}] بنجاح.", flush=True)
     except Exception as e:
         print(f"❌ خطأ أثناء التحديث: {e}", flush=True)
 
@@ -143,7 +156,7 @@ def process_table(table_name, url_column, title_column="title"):
     print(f"📂 فحص الجدول: {table_name}", flush=True)
     print(f"========================================", flush=True)
     try:
-        response = supabase.table(table_name).select(f"id, {title_column}, {url_column}").eq("is_uploaded", False).execute()
+        response = supabase.table(table_name).select(f"id, {title_column}, {url_column}").eq("is_uploaded", False).limit(5).execute()
         items = response.data
     except Exception as e:
         print(f"❌ خطأ في جلب البيانات من {table_name}: {e}", flush=True)
@@ -167,16 +180,16 @@ def process_table(table_name, url_column, title_column="title"):
         
         direct_url = get_video_link_with_browser(watch_url)
         if direct_url:
-            local_file = download_video_temporarily(direct_url)
+            local_file = download_video_temporarily(direct_url, record_id)
             if local_file and os.path.exists(local_file):
                 archive_url = upload_to_archive(local_file, record_id)
                 if archive_url:
-                    update_status(table_name, record_id)
+                    update_status(table_name, record_id, archive_url)
                 
                 if os.path.exists(local_file):
                     os.remove(local_file)
         else:
-            print("❌ فشل استخراج الرابط المباشر.", flush=True)
+            print("❌ فشل استخراج الرابط المباشر بواسطة المتصفح.", flush=True)
 
 def main():
     process_table("movies_cima", "watch_url", "title")
