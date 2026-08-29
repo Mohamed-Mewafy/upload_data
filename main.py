@@ -54,7 +54,7 @@ def get_video_link_with_browser(embed_url):
             for i in range(4):
                 try:
                     page.evaluate("""() => {
-                        const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play"], .jw-display-icon-container, iframe');
+                        const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play'], .jw-display-icon-container, iframe');
                         elements.forEach(el => el.click());
                     }""")
                 except:
@@ -76,12 +76,12 @@ def get_video_link_with_browser(embed_url):
 
 def download_video_temporarily(video_url, record_id, output_dir="."):
     output_path = os.path.join(output_dir, f"{record_id}.mp4")
-    print(f"📥 جاري تحميل وتجميع الفيديو باستخدام (yt-dlp)...", flush=True)
+    print(f"📥 جاري تحميل وتجميع الفيلم...", flush=True)
     
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
-        'quiet': False,
+        'quiet': True,          # إخفاء تفاصيل وخطوط التحميل الزائدة من yt-dlp
         'no_warnings': True,
         'http_headers': {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -95,17 +95,16 @@ def download_video_temporarily(video_url, record_id, output_dir="."):
             
         if os.path.exists(output_path):
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"📦 حجم الملف المنزل: {file_size_mb:.2f} MB", flush=True)
+            print(f"📦 تم التحميل بنجاح | الحجم: {file_size_mb:.2f} MB", flush=True)
             
             if file_size_mb < 2:
                 print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، غالباً الرابط تالف.", flush=True)
                 os.path.exists(output_path) and os.remove(output_path)
                 return None
                 
-            print("✅ تم التحميل والتجميع بنجاح تام!", flush=True)
             return output_path
     except Exception as e:
-        print(f"❌ خطأ أثناء التحميل بـ yt-dlp: {e}", flush=True)
+        print(f"❌ خطأ أثناء التحميل: {e}", flush=True)
         
     if os.path.exists(output_path):
         os.remove(output_path)
