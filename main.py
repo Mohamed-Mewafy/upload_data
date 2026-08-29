@@ -1,5 +1,4 @@
 import os
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
@@ -15,7 +14,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-# عدد الأفلام التي سيتم معالجتها ورفعها في نفس الوقت (توازي)
+# عدد العمليات المتوازية في نفس الوقت
 MAX_CONCURRENT_WORKERS = 3
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
@@ -85,16 +84,16 @@ def get_video_link_with_browser(embed_url):
     return extracted_url
 
 def upload_stream_to_archive(video_url, record_id):
-    """رفع مباشر وسريع إلى Archive.org عبر البث (Stream) بدون حفظ الملف على القرص الصلب"""
-    identifier = f"cimaspace-item-{record_id}"
+    """رفع مباشر وسريع إلى Archive.org عبر البث (Stream) بمعرف UUID فقط"""
+    identifier = f"{record_id}"
     file_name = f"{record_id}.mp4"
-    print(f"🚀 [بدء الرفع المباشر Stream] لـ ID: {record_id} إلى Archive.org...", flush=True)
+    print(f"🚀 [بدء الرفع المباشر Stream] بمعرف [{identifier}] إلى Archive.org...", flush=True)
     
     metadata = {
         'mediatype': 'movies',
         'collection': 'opensource_movies',
-        'title': f"Media Item {record_id}",
-        'description': 'Encrypted media storage.'
+        'title': f"{record_id}",
+        'description': 'Media content.'
     }
     
     headers = {
@@ -103,11 +102,9 @@ def upload_stream_to_archive(video_url, record_id):
     }
 
     try:
-        # فتح الاتصال المباشر مع رابط الفيديو كـ Stream
         with requests.get(video_url, headers=headers, stream=True, timeout=30) as response:
             response.raise_for_status()
             
-            # رفع البث فوراً عبر fileobj
             r = ia.upload(
                 identifier,
                 files={file_name: response.raw},
@@ -168,13 +165,12 @@ def process_single_item(item, table_name, url_column, title_column):
         
         direct_url = get_video_link_with_browser(current_url)
         if direct_url:
-            # الرفع المباشر فوراً بدون حفظ على الديسك
             archive_url = upload_stream_to_archive(direct_url, record_id)
             if archive_url:
                 update_status(table_name, record_id, archive_url)
                 return True
                 
-        print(f"⚠️ فشل الرابط الحـالي للـ ID: {record_id}، تجربة الرابط التالي...", flush=True)
+        print(f"⚠️ فشل الرابط الحالي للـ ID: {record_id}، تجربة الرابط التالي...", flush=True)
         
     print(f"❌ فشلت كل الروابط المتاحة للفيلم ID: {record_id}", flush=True)
     return False
@@ -196,7 +192,6 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
         print(f"🎉 لا توجد عناصر جديدة في جدول {table_name}.", flush=True)
         return
 
-    # تشغيل المعالجة بالتوازي للـ items المقروءة
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         futures = [
             executor.submit(process_single_item, item, table_name, url_column, title_column) 
@@ -210,7 +205,6 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
                 print(f"❌ حدث خطأ غير متوقع في إحدى المهام بالتوازي: {e}", flush=True)
 
 def main():
-    # رفع السقف إلى 10 عناصر لكل جدول لزيادة عدد الأفلام
     process_table_parallel("movies_cima", "watch_url", "title", limit=10)
     process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
     process_table_parallel("tv_series", "watch_url", "title", limit=10)
