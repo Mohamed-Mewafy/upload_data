@@ -74,16 +74,33 @@ def get_video_link_with_browser(embed_url):
         browser.close()
     return extracted_url
 
+def my_hook(d):
+    if d['status'] == 'downloading':
+        downloaded = d.get('downloaded_bytes', 0) / (1024 * 1024)
+        total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+        total_mb = total / (1024 * 1024) if total else 0
+        speed = d.get('speed', 0)
+        speed_mb = (speed / (1024 * 1024)) if speed else 0
+        percent = d.get('_percent_str', '0%').strip()
+        
+        if total_mb > 0:
+            print(f"\r📥 تم تحميل: {downloaded:.2f} MB من {total_mb:.2f} MB ({percent}) | السرعة: {speed_mb:.2f} MB/s", end="", flush=True)
+        else:
+            print(f"\r📥 تم تحميل: {downloaded:.2f} MB | السرعة: {speed_mb:.2f} MB/s", end="", flush=True)
+    elif d['status'] == 'finished':
+        print("\n✨ تمت عملية التنزيل بنجاح، جاري المعالجة...", flush=True)
+
 def download_video_temporarily(video_url, record_id, output_dir="."):
     output_path = os.path.join(output_dir, f"{record_id}.mp4")
-    print(f"📥 جاري التحميل والتجميع...", flush=True)
+    print(f"📥 بدء التحميل...", flush=True)
     
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
-        'noprogress': True,
+        'noprogress': False,
+        'progress_hooks': [my_hook],
         'http_headers': {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://cimaspace.site/"
@@ -96,7 +113,7 @@ def download_video_temporarily(video_url, record_id, output_dir="."):
             
         if os.path.exists(output_path):
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"📦 تم التحميل | الحجم: {file_size_mb:.2f} MB", flush=True)
+            print(f"📦 تم التحميل النهائي | الحجم: {file_size_mb:.2f} MB", flush=True)
             
             if file_size_mb < 2:
                 print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، الرابط تالف.", flush=True)
@@ -158,7 +175,6 @@ def process_table(table_name, url_column, title_column="title"):
     print(f"📂 فحص الجدول: {table_name}", flush=True)
     print(f"========================================", flush=True)
     try:
-        # جلب الـ watch_url وكذلك خانة direct_links للبدائل
         response = supabase.table(table_name).select(f"id, {title_column}, {url_column}, direct_links").eq("is_uploaded", False).limit(5).execute()
         items = response.data
     except Exception as e:
@@ -175,12 +191,10 @@ def process_table(table_name, url_column, title_column="title"):
         main_watch_url = item.get(url_column)
         direct_links_json = item.get("direct_links") or {}
         
-        # تجميع كل الروابط المتاحة (الرئيسي + البدائل إن وجدت) في قائمة واحدة للتجربة بالتسلسل
         urls_to_try = []
         if main_watch_url:
             urls_to_try.append(main_watch_url)
             
-        # استخراج روابط البدائل من الـ streaming_links داخل الـ direct_links
         if isinstance(direct_links_json, dict):
             streaming_list = direct_links_json.get("streaming_links", [])
             if isinstance(streaming_list, list):
@@ -197,7 +211,6 @@ def process_table(table_name, url_column, title_column="title"):
         print(f"----------------------------------------", flush=True)
         
         success = False
-        # حلقة تجربة الروابط واحداً تلو الآخر
         for link_index, current_url in enumerate(urls_to_try, 1):
             print(f"🔗 محاولة الرابط ({link_index}/{len(urls_to_try)})...", flush=True)
             
@@ -208,17 +221,17 @@ def process_table(table_name, url_column, title_column="title"):
                     archive_url = upload_to_archive(local_file, record_id)
                     if archive_url:
                         update_status(table_name, record_id, archive_url)
-                        success = True
+                        success = Status = True
                     
                     if os.path.exists(local_file):
                         os.remove(local_file)
                         
                     if success:
-                        break # نجح الرابط، اخرج من حلقة البدائل وادخل على الفيلم اللي بعده
-            print(f"⚠️ فشل الرابط الحالي، الانتقال للرابط التالي (إن وجد)...", flush=True)
+                        break
+            print(f"⚠️ فشل الرابط الحالي، الانتقال للرابط التالي...", flush=True)
             
         if not success:
-            print(f"❌ فشلت كل الروابط المتاحة لهذا الفيلم ولم يتم الرفع.", flush=True)
+            print(f"❌ فشلت كل الروابط المتاحة لهذا الفيلم.", flush=True)
 
 def main():
     process_table("movies_cima", "watch_url", "title")
