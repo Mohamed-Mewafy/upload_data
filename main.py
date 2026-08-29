@@ -74,33 +74,17 @@ def get_video_link_with_browser(embed_url):
         browser.close()
     return extracted_url
 
-def my_hook(d):
-    if d['status'] == 'downloading':
-        downloaded = d.get('downloaded_bytes', 0) / (1024 * 1024)
-        total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-        total_mb = total / (1024 * 1024) if total else 0
-        speed = d.get('speed', 0)
-        speed_mb = (speed / (1024 * 1024)) if speed else 0
-        percent = d.get('_percent_str', '0%').strip()
-        
-        if total_mb > 0:
-            print(f"\r📥 تم تحميل: {downloaded:.2f} MB من {total_mb:.2f} MB ({percent}) | السرعة: {speed_mb:.2f} MB/s", end="", flush=True)
-        else:
-            print(f"\r📥 تم تحميل: {downloaded:.2f} MB | السرعة: {speed_mb:.2f} MB/s", end="", flush=True)
-    elif d['status'] == 'finished':
-        print("\n✨ تمت عملية التنزيل بنجاح، جاري المعالجة...", flush=True)
-
 def download_video_temporarily(video_url, record_id, output_dir="."):
     output_path = os.path.join(output_dir, f"{record_id}.mp4")
-    print(f"📥 بدء التحميل...", flush=True)
+    print(f"📥 بدء التحميل بأقصى سرعة (Multi-thread)...", flush=True)
     
     ydl_opts = {
         'format': 'best',
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
-        'noprogress': False,
-        'progress_hooks': [my_hook],
+        'noprogress': True, # إيقاف اللوج المزعج والتداخل
+        'concurrent_fragment_downloads': 8, # تحميل 8 أجزاء في نفس الوقت لمضاعفة السرعة
         'http_headers': {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://cimaspace.site/"
@@ -113,7 +97,7 @@ def download_video_temporarily(video_url, record_id, output_dir="."):
             
         if os.path.exists(output_path):
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"📦 تم التحميل النهائي | الحجم: {file_size_mb:.2f} MB", flush=True)
+            print(f"📦 تم التحميل بنجاح | الحجم النهائي: {file_size_mb:.2f} MB", flush=True)
             
             if file_size_mb < 2:
                 print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، الرابط تالف.", flush=True)
@@ -221,7 +205,7 @@ def process_table(table_name, url_column, title_column="title"):
                     archive_url = upload_to_archive(local_file, record_id)
                     if archive_url:
                         update_status(table_name, record_id, archive_url)
-                        success = Status = True
+                        success = True
                     
                     if os.path.exists(local_file):
                         os.remove(local_file)
