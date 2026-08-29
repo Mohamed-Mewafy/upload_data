@@ -1,6 +1,6 @@
 import os
 import time
-import requests
+import yt_dlp
 import internetarchive as ia
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
@@ -29,7 +29,7 @@ def get_video_link_with_browser(embed_url):
                 "--disable-dev-shm-usage", 
                 "--no-sandbox", 
                 "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled" # مهم جداً لتجاوز كشف المتصفحات الوهمية
+                "--disable-blink-features=AutomationControlled"
             ]
         )
         context = browser.new_context(
@@ -41,7 +41,6 @@ def get_video_link_with_browser(embed_url):
         
         def check_url(url):
             nonlocal extracted_url
-            # استهداف الروابط الحقيقية وتجنب ملفات الـ ts الصغيرة أو إعلانات الـ chunk
             if any(ext in url.lower() for ext in ['.m3u8', '.mp4', 'video/mp4']) and 'chunk' not in url and 'ads' not in url and 'seg' not in url:
                 if not extracted_url:
                     extracted_url = url
@@ -77,34 +76,37 @@ def get_video_link_with_browser(embed_url):
 
 def download_video_temporarily(video_url, record_id, output_dir="."):
     output_path = os.path.join(output_dir, f"{record_id}.mp4")
-    print(f"📥 جاري تحميل الفيديو مؤقتاً لمعالجته...", flush=True)
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(video_url, headers=headers, stream=True, timeout=120, verify=False)
-        
-        if response.status_code == 200:
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024*1024):
-                    if chunk:
-                        f.write(chunk)
-            
-            if os.path.exists(output_path):
-                file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                print(f"📦 حجم الملف المنزل: {file_size_mb:.2f} MB", flush=True)
-                
-                # رفع الحد الأدنى إلى 10 ميجا للتأكد أنه فيلم مش فيديو ثانية واحدة أو صفحة خطأ
-                if file_size_mb < 10:  
-                    print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، غالباً الرابط تالف أو جيت هب تم حظره.", flush=True)
-                    os.remove(output_path)
-                    return None
-                    
-                print("✅ تم التحقق والتحميل المؤقت بنجاح.", flush=True)
-                return output_path
-        else:
-            print(f"❌ فشل التحميل، كود الاستجابة: {response.status_code}", flush=True)
-    except Exception as e:
-        print(f"❌ خطأ أثناء التحميل: {e}", flush=True)
+    print(f"📥 جاري تحميل وتجميع الفيديو باستخدام (yt-dlp)...", flush=True)
     
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': output_path,
+        'quiet': False,
+        'no_warnings': True,
+        'http_headers': {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://cimaspace.site/"
+        }
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+            
+        if os.path.exists(output_path):
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"📦 حجم الملف المنزل: {file_size_mb:.2f} MB", flush=True)
+            
+            if file_size_mb < 2:
+                print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، غالباً الرابط تالف.", flush=True)
+                os.path.exists(output_path) and os.remove(output_path)
+                return None
+                
+            print("✅ تم التحميل والتجميع بنجاح تام!", flush=True)
+            return output_path
+    except Exception as e:
+        print(f"❌ خطأ أثناء التحميل بـ yt-dlp: {e}", flush=True)
+        
     if os.path.exists(output_path):
         os.remove(output_path)
     return None
@@ -145,7 +147,7 @@ def update_status(table_name, record_id, archive_url):
     try:
         supabase.table(table_name).update({
             "is_uploaded": True,
-            "watch_url": archive_url # تحديث اللينك القديم باللينك المباشر الجديد في سوبابيز تلقائياً
+            "watch_url": archive_url
         }).eq("id", record_id).execute()
         print(f"🔄 تم تحديث حالة الرفع والرابط في جدول [{table_name}] بنجاح.", flush=True)
     except Exception as e:
