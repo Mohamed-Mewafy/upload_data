@@ -14,7 +14,7 @@ ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
-    raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}", flush=True)
+    raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -83,8 +83,8 @@ def download_video_temporarily(video_url, record_id, output_dir="."):
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
-        'noprogress': True, # إيقاف اللوج المزعج والتداخل
-        'concurrent_fragment_downloads': 8, # تحميل 8 أجزاء في نفس الوقت لمضاعفة السرعة
+        'noprogress': True,
+        'concurrent_fragment_downloads': 8,
         'http_headers': {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://cimaspace.site/"
@@ -117,9 +117,10 @@ def upload_to_archive(file_path, record_id):
     file_name = f"{record_id}.mp4"
     print(f"📤 جاري الرفع إلى Archive.org بمعرف [{identifier}]...", flush=True)
     
+    # تم تغيير 'movies' إلى 'opensource_movies' لحل مشكلة Access Denied
     metadata = {
         'mediatype': 'movies',
-        'collection': 'movies',
+        'collection': 'opensource_movies',
         'title': f"Media Item {record_id}",
         'description': 'Encrypted media storage.'
     }
