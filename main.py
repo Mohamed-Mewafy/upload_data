@@ -88,6 +88,12 @@ def upload_to_archive(file_path, identifier, title):
         return f"https://archive.org/download/{identifier}/{file_name}"
     return None
 
+# دالة لتحديث الصفوف الفاشلة (نعلمها كـ is_uploaded = True لتخطيها)
+def mark_as_processed_failed(movie_id):
+    supabase.table("movies_cima").update({
+        "is_uploaded": True
+    }).eq("id", movie_id).execute()
+
 # 5. الدالة الرئيسية لمعالجة كل فيلم
 async def process_movie(movie):
     movie_id = movie.get("id")
@@ -98,7 +104,7 @@ async def process_movie(movie):
 
     if not embed_links:
         print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}", flush=True)
-        supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
+        mark_as_processed_failed(movie_id)
         return
 
     direct_source_url = None
@@ -111,7 +117,7 @@ async def process_movie(movie):
 
     if not direct_source_url:
         print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.", flush=True)
-        supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
+        mark_as_processed_failed(movie_id)
         return
 
     clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '_')).rstrip()
@@ -123,7 +129,7 @@ async def process_movie(movie):
         download_success = download_video(direct_source_url, temp_path)
         if not download_success or not os.path.exists(temp_path):
             print(f"❌ فشل تحميل ملف الفيديو.", flush=True)
-            supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
+            mark_as_processed_failed(movie_id)
             return
 
         direct_archive_mp4 = upload_to_archive(temp_path, identifier, title)
@@ -132,18 +138,18 @@ async def process_movie(movie):
             print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}", flush=True)
             supabase.table("movies_cima").update({
                 "watch_url": direct_archive_mp4,
-                "status": "completed"
+                "is_uploaded": True
             }).eq("id", movie_id).execute()
             print(f"💾 تم تحديث Supabase بنجاح.", flush=True)
         else:
             print(f"❌ فشلت عملية الرفع لـ Internet Archive.", flush=True)
-            supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
+            mark_as_processed_failed(movie_id)
 
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# 6. التشغيل لمعالجة البيانات المعلقة المتاحة على دفعات متتالية
+# 6. التشغيل لمعالجة البيانات غير المعالجة على دفعات (is_uploaded = False)
 async def main():
     print("==========================================", flush=True)
     print("📂 بدء جلب ومعالجة الأفلام المعلقة...", flush=True)
@@ -154,11 +160,10 @@ async def main():
 
     while True:
         try:
-            # استعلام مباشر وبسيط لجلب أي صف تكون فيه قيمة watch_url فارغة (null)
             response = (
                 supabase.table("movies_cima")
                 .select("*")
-                .is_("watch_url", "null")
+                .eq("is_uploaded", False)
                 .limit(5)
                 .execute()
             )
