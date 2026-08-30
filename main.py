@@ -98,7 +98,6 @@ async def process_movie(movie):
 
     if not embed_links:
         print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}", flush=True)
-        # تحديث الحقل لـ failed لمنع إعادة جلب نفس الفيلم الفاشل
         supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
         return
 
@@ -144,10 +143,10 @@ async def process_movie(movie):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# 6. التشغيل بمعالجة جميع الدفعات المتاحة حتى الانتهاء بالكامل
+# 6. التشغيل لمعالجة البيانات المعلقة المتاحة على دفعات متتالية
 async def main():
     print("==========================================", flush=True)
-    print("📂 بدء معالجة الأفلام على دفعات متتالية...", flush=True)
+    print("📂 بدء جلب ومعالجة الأفلام المعلقة...", flush=True)
     print("==========================================", flush=True)
 
     batch_count = 0
@@ -155,13 +154,12 @@ async def main():
 
     while True:
         try:
-            # جلب دفعة مكونة من 10 أفلام غير معالجة ولم تفشل بعد
+            # استعلام مباشر وبسيط لجلب أي صف تكون فيه قيمة watch_url فارغة (null)
             response = (
                 supabase.table("movies_cima")
                 .select("*")
                 .is_("watch_url", "null")
-                .neq("watch_url", "failed")
-                .limit(10)
+                .limit(5)
                 .execute()
             )
             movies = response.data
@@ -178,10 +176,10 @@ async def main():
                 total_processed += 1
 
         except Exception as e:
-            print(f"⚠️ حدث خطأ أثناء جلب الدفعة: {e}", flush=True)
+            print(f"⚠️ حدث خطأ أثناء جلب البيانات: {e}", flush=True)
             break
 
-    print(f"\n🏁 إجمالي الأفلام التي تم فحصها في هذه الجلسة: {total_processed}")
+    print(f"\n🏁 إجمالي الأفلام التي تم فحصها في هذه الجلسة: {total_processed}", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
