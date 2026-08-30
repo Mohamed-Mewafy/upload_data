@@ -21,7 +21,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 async def get_direct_video_url(embed_url):
     direct_url = None
     async with async_playwright() as p:
-        # تشغيل المتصفح بوضع الخفاء مع إعدادات تخفيف الحمل
         browser = await p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-setuid-sandbox']
@@ -29,7 +28,6 @@ async def get_direct_video_url(embed_url):
         context = await browser.new_context()
         page = await context.new_page()
 
-        # حجب الصور والملفات الثقيلة لتسريع عملية الفحص
         async def block_resources(route):
             if route.request.resource_type in ["image", "stylesheet", "font"]:
                 await route.abort()
@@ -38,7 +36,6 @@ async def get_direct_video_url(embed_url):
 
         await page.route("**/*", block_resources)
 
-        # التقاط طلبات الشبكة للبحث عن امتداد الفيديو المباشر
         def handle_request(request):
             nonlocal direct_url
             url = request.url
@@ -50,11 +47,11 @@ async def get_direct_video_url(embed_url):
 
         try:
             await page.goto(embed_url, wait_until="domcontentloaded", timeout=20000)
-            for _ in range(12):  # الانتظار لمدة تصل إلى 6 ثوانٍ للتقاط الفيديو
+            for _ in range(12):
                 if direct_url:
                     break
                 await asyncio.sleep(0.5)
-        except Exception as e:
+        except Exception:
             pass
         finally:
             await browser.close()
@@ -79,7 +76,6 @@ def upload_to_archive(file_path, identifier, title):
     print(f"🚀 جاري الرفع إلى Internet Archive...")
     file_name = os.path.basename(file_path)
     
-    # الرفع عبر مكتبة internetarchive
     status = upload(
         identifier,
         files=[file_path],
@@ -89,9 +85,7 @@ def upload_to_archive(file_path, identifier, title):
     )
     
     if status[0].status_code == 200:
-        # تركيب الرابط المباشر للملف
-        direct_archive_url = f"https://archive.org/download/{identifier}/{file_name}"
-        return direct_archive_url
+        return f"https://archive.org/download/{identifier}/{file_name}"
     return None
 
 # 5. الدالة الرئيسية لمعالجة كل فيلم
@@ -100,94 +94,85 @@ async def process_movie(movie):
     title = movie.get("title", f"movie_{movie_id}")
     embed_links = movie.get("embed_links", [])
 
-    print(f"\n🎬 [ID: {movie_id}] بدء معالجة الفيلم: {title}")
+    print(f"\n🎬 [ID: {movie_id}] بدء معالجة الفيلم: {title}", flush=True)
 
     if not embed_links:
-        print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}")
+        print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}", flush=True)
         supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
         return
 
     direct_source_url = None
     for index, embed_url in enumerate(embed_links, 1):
-        print(f"🔗 تجربة الرابط ({index}/{len(embed_links)}): {embed_url}")
+        print(f"🔗 تجربة الرابط ({index}/{len(embed_links)}): {embed_url}", flush=True)
         direct_source_url = await get_direct_video_url(embed_url)
         if direct_source_url:
-            print(f"✅ تم العثور على مصدر الفيديو المباشر!")
+            print(f"✅ تم العثور على مصدر الفيديو المباشر!", flush=True)
             break
 
     if not direct_source_url:
-        print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.")
+        print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.", flush=True)
         supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
         return
 
-    # مسار التخزين المؤقت للفيلم
     clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '_')).rstrip()
     filename = f"{clean_title}.mp4"
     temp_path = os.path.join("/tmp", filename)
     identifier = f"cima_space_{movie_id}"
 
     try:
-        # أ) التحميل
         download_success = download_video(direct_source_url, temp_path)
         if not download_success or not os.path.exists(temp_path):
-            print(f"❌ فشل تحميل ملف الفيديو.")
+            print(f"❌ فشل تحميل ملف الفيديو.", flush=True)
             supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
             return
 
-        # ب) الرفع للحصول على رابط .mp4
         direct_archive_mp4 = upload_to_archive(temp_path, identifier, title)
 
         if direct_archive_mp4:
-            print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}")
-
-            # ج) تحديث قاعدة بيانات Supabase بالرابط المباشر
+            print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}", flush=True)
             supabase.table("movies_cima").update({
                 "stream_url": direct_archive_mp4,
                 "status": "completed"
             }).eq("id", movie_id).execute()
-            print(f"💾 تم تحديث Supabase بنجاح.")
+            print(f"💾 تم تحديث Supabase بنجاح.", flush=True)
         else:
-            print(f"❌ فشلت عملية الرفع لـ Internet Archive.")
+            print(f"❌ فشلت عملية الرفع لـ Internet Archive.", flush=True)
             supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
 
     finally:
-        # د) حذف الملف المؤقت بعد الانتهاء لتوفير المساحة
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# 6. التشغيل التنفيذي للمشروع بشكل مستمر (Infinite Loop)
+# 6. التشغيل لمعالجة الدفعات المتاحة ثم الإنهاء تلقائياً
 async def main():
-    print("==========================================")
-    print("🚀 بدء محرك المعالجة المستمرة لـ CimaSpace...")
-    print("==========================================")
+    print("==========================================", flush=True)
+    print("🚀 بدء محرك معالجة البيانات...", flush=True)
+    print("==========================================", flush=True)
 
     while True:
         try:
-            # جلب الدفعة التالية من الأفلام المعلقة (stream_url is null و status ليست failed)
             response = (
                 supabase.table("movies_cima")
                 .select("*")
                 .is_("stream_url", "null")
                 .neq("status", "failed")
-                .limit(10)
+                .limit(5)
                 .execute()
             )
             movies = response.data
 
             if not movies:
-                print("\n✨ لا توجد أفلام معلقة حالياً. الانتظار 60 ثانية قبل الفحص التلقائي...")
-                await asyncio.sleep(60)
-                continue
+                print("\n✨ انتهت جميع الأفلام المعلقة بنجاح!", flush=True)
+                break
 
-            print(f"\n📦 تم جلب دفعة جديدة تحتوي على {len(movies)} أفلام...")
+            print(f"\n📦 تم جلب دفعة جديدة تحتوي على {len(movies)} أفلام...", flush=True)
 
             for movie in movies:
                 await process_movie(movie)
 
         except Exception as e:
-            print(f"\n⚠️ حدث خطأ في حلقة التشغيل الرئيسية: {e}")
-            print("الانتظار 30 ثانية قبل إعادة المحاولة...")
-            await asyncio.sleep(30)
+            print(f"\n⚠️ حدث خطأ في حلقة التشغيل الرئيسية: {e}", flush=True)
+            break
 
 if __name__ == "__main__":
     asyncio.run(main())
