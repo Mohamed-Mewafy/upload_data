@@ -60,7 +60,7 @@ async def get_direct_video_url(embed_url):
 
 # 3. تحميل الفيديو إلى السيرفر المحتوي على السكربت باستخدام yt-dlp
 def download_video(video_url, output_path):
-    print(f"⬇️ جاري تنزيل الفيديو إلى السيرفر المحلي...")
+    print(f"⬇️ جاري تنزيل الفيديو إلى السيرفر المحلي...", flush=True)
     command = [
         "yt-dlp",
         "-f", "best[ext=mp4]/best",
@@ -73,7 +73,7 @@ def download_video(video_url, output_path):
 
 # 4. رفع الملف إلى Internet Archive وتوليد الرابط المباشر
 def upload_to_archive(file_path, identifier, title):
-    print(f"🚀 جاري الرفع إلى Internet Archive...")
+    print(f"🚀 جاري الرفع إلى Internet Archive...", flush=True)
     file_name = os.path.basename(file_path)
     
     status = upload(
@@ -98,7 +98,6 @@ async def process_movie(movie):
 
     if not embed_links:
         print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}", flush=True)
-        supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
         return
 
     direct_source_url = None
@@ -111,7 +110,6 @@ async def process_movie(movie):
 
     if not direct_source_url:
         print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.", flush=True)
-        supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
         return
 
     clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '_')).rstrip()
@@ -123,13 +121,14 @@ async def process_movie(movie):
         download_success = download_video(direct_source_url, temp_path)
         if not download_success or not os.path.exists(temp_path):
             print(f"❌ فشل تحميل ملف الفيديو.", flush=True)
-            supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
             return
 
         direct_archive_mp4 = upload_to_archive(temp_path, identifier, title)
 
         if direct_archive_mp4:
             print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}", flush=True)
+
+            # تحديث الجدول بنسخة السكربت الأصلية (stream_url و status)
             supabase.table("movies_cima").update({
                 "stream_url": direct_archive_mp4,
                 "status": "completed"
@@ -137,32 +136,31 @@ async def process_movie(movie):
             print(f"💾 تم تحديث Supabase بنجاح.", flush=True)
         else:
             print(f"❌ فشلت عملية الرفع لـ Internet Archive.", flush=True)
-            supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
 
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# 6. التشغيل لمعالجة الدفعات المتاحة ثم الإنهاء تلقائياً
+# 6. التشغيل لمعالجة البيانات المعلقة المتاحة
 async def main():
     print("==========================================", flush=True)
-    print("🚀 بدء محرك معالجة البيانات...", flush=True)
+    print("📂 جلب البيانات المعلقة من Supabase...", flush=True)
     print("==========================================", flush=True)
 
     while True:
         try:
+            # نفس الاستعلام الأصلي الخاص بك بفلترة stream_url is null
             response = (
                 supabase.table("movies_cima")
                 .select("*")
                 .is_("stream_url", "null")
-                .neq("status", "failed")
                 .limit(5)
                 .execute()
             )
             movies = response.data
 
             if not movies:
-                print("\n✨ انتهت جميع الأفلام المعلقة بنجاح!", flush=True)
+                print("✨ لا توجد أفلام معلقة بانتظار المعالجة.", flush=True)
                 break
 
             print(f"\n📦 تم جلب دفعة جديدة تحتوي على {len(movies)} أفلام...", flush=True)
@@ -171,7 +169,8 @@ async def main():
                 await process_movie(movie)
 
         except Exception as e:
-            print(f"\n⚠️ حدث خطأ في حلقة التشغيل الرئيسية: {e}", flush=True)
+            print(f"⚠️ حدث خطأ في عملية الجلب: {e}", flush=True)
+            print("💡 تنبيه: تأكد من وجود عمود 'stream_url' داخل جدول 'movies_cima' في Supabase.", flush=True)
             break
 
 if __name__ == "__main__":
