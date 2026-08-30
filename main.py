@@ -137,9 +137,9 @@ async def process_movie(movie):
         if direct_archive_mp4:
             print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}")
 
-            # ج) تحديث قاعدة بيانات Supabase بالرابط المباشر
+            # ج) تحديث قاعدة بيانات Supabase بالرابط المباشر في عمود watch_url
             supabase.table("movies_cima").update({
-                "stream_url": direct_archive_mp4,
+                "watch_url": direct_archive_mp4,
                 "status": "completed"
             }).eq("id", movie_id).execute()
             print(f"💾 تم تحديث Supabase بنجاح.")
@@ -157,8 +157,8 @@ async def main():
     print("📂 جلب البيانات المعلقة من Supabase...")
     print("==========================================")
 
-    # جلب الأفلام التي لم تُعالج بعد (status is null أو pending)
-    response = supabase.table("movies_cima").select("*").is_("stream_url", "null").limit(100).execute()
+    # جلب الأفلام التي لم تُعالج بعد (watch_url is null)
+    response = supabase.table("movies_cima").select("*").is_("watch_url", "null").limit(100).execute()
     movies = response.data
 
     if not movies:
