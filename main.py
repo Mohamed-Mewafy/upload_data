@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 import requests
 import yt_dlp
-import internetarchive as ia
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
 
@@ -14,16 +13,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
-SECRET_KEY = os.environ.get("IA_SECRET_KEY")
+VK_ACCESS_TOKEN = os.environ.get("VK_ACCESS_TOKEN")
 
 WATERMARK_TEXT = "CimaSpace.site"
-
 MAX_CONCURRENT_WORKERS = 2
 log_lock = Lock()
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
     raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}")
+
+if not VK_ACCESS_TOKEN:
+    raise ValueError("❌ خطأ: رمز الوصول VK_ACCESS_TOKEN غير معرف في البيئة.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -72,8 +72,8 @@ def get_video_link_with_browser(embed_url, item_id):
     log(f"🌐 [{short_id}] تجربة الرابط: {embed_url}")
     extracted_url = None
     
-    if "archive.org" in embed_url.lower():
-        log(f"⚠️ [{short_id}] تخطي رابط Archive مكرر")
+    if "vk.com" in embed_url.lower() or "vk.ru" in embed_url.lower():
+        log(f"⚠️ [{short_id}] تخطي رابط VK مكرر")
         return None, embed_url
 
     try:
@@ -98,7 +98,7 @@ def get_video_link_with_browser(embed_url, item_id):
             def check_url(url):
                 nonlocal extracted_url
                 url_lower = url.lower()
-                if any(ext in url_lower for ext in ['.m3u8', '.mp4', 'video/mp4']) and not any(ign in url_lower for ign in ['archive.org', 'chunk', 'ads', 'seg', 'analytics', 'googlevideo']):
+                if any(ext in url_lower for ext in ['.m3u8', '.mp4', 'video/mp4']) and not any(ign in url_lower for ign in ['vk.com', 'chunk', 'ads', 'seg', 'analytics', 'googlevideo']):
                     if not extracted_url:
                         extracted_url = url
                         log(f"🎯 [{short_id}] تم صيد الرابط المباشر")
@@ -108,7 +108,6 @@ def get_video_link_with_browser(embed_url, item_id):
             
             try:
                 page.goto(embed_url, timeout=12000, wait_until="domcontentloaded")
-                
                 try:
                     page.evaluate("""() => {
                         const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play"], .jw-display-icon-container, iframe');
@@ -121,7 +120,6 @@ def get_video_link_with_browser(embed_url, item_id):
                     if extracted_url:
                         break
                     time.sleep(0.5)
-                    
             except Exception:
                 log(f"⚠️ [{short_id}] تجاوز الرابط (تخطى المهلة 12s)")
                 
@@ -176,75 +174,65 @@ def download_video_temporarily(video_url, embed_url, record_id):
             
     return None
 
-def verify_direct_url(url, retries=10, delay=6):
-    """الانتظار والتأكد الفعلي من جاهزية رابط MP4 المباشر على أرشيف"""
-    for attempt in range(retries):
-        try:
-            res = requests.head(url, allow_redirects=True, timeout=10)
-            if res.status_code == 200:
-                content_length = int(res.headers.get('Content-Length', 0))
-                if content_length > 1000000:
-                    return True
-        except Exception:
-            pass
-        time.sleep(delay)
-    return False
-
-def upload_to_archive(file_path, record_id, video_title="Movie"):
-    """رفع الملف إلى Archive بإنشاء identifier فريد لتجنب حظر Access Denied"""
+def upload_to_vk(file_path, record_id, video_title="Movie"):
+    """رفع الفيديو إلى منصة VK والحصول على رابط المشاهدة الضمني (Embed URL)"""
     short_id = str(record_id)[:8]
-    # اسم الملف سيكون الـ UUID الكامل
-    target_filename = f"{record_id}.mp4"
-    # معرف الحاوية أضيف له طابع زمني لمنع التعارض عند المحاولات المتكررة
-    timestamp = int(time.time())
-    identifier = f"cimaspace-item-{record_id}-{timestamp}"
-    
-    log(f"🚀 [{short_id}] جاري الرفع لـ Archive باسم: {target_filename}...")
-    
     display_title = f"{video_title} - CimaSpace"
-
-    metadata = {
-        'mediatype': 'movies',
-        'collection': 'opensource_movies',
-        'title': display_title,
-        'description': f'Watch {video_title} on CimaSpace'
+    description = f"Watch {video_title} on CimaSpace"
+    
+    log(f"🚀 [{short_id}] الحصول على سيرفر الرفع من VK...")
+    
+    # الخطوة 1: طلب رابط السيرفر المخصص للرفع من VK API
+    save_url = "https://api.vk.com/method/video.save"
+    params = {
+        "name": display_title,
+        "description": description,
+        "is_private": 0,
+        "wallpost": 0,
+        "access_token": VK_ACCESS_TOKEN,
+        "v": "5.131"
     }
 
     try:
-        r = ia.upload(
-            identifier,
-            files={target_filename: file_path},
-            metadata=metadata,
-            access_key=ACCESS_KEY,
-            secret_key=SECRET_KEY,
-            retries=3,
-            verbose=False
-        )
-        
-        if r and r[0].status_code == 200:
-            direct_mp4_url = f"https://archive.org/download/{identifier}/{target_filename}"
-            
-            log(f"🔍 [{short_id}] التحقق من جاهزية الرابط على سيرفرات الأرشيف...")
-            if verify_direct_url(direct_mp4_url):
-                log(f"✅ [{short_id}] تم الرفع والتحقق بنجاح! الرابط: {direct_mp4_url}")
-                return direct_mp4_url
-            else:
-                log(f"⚠️ [{short_id}] الفيديو تم رفعه لكن استغرق وقت معالجة أكثر من المتوقع.")
-                return None
-        else:
-            log(f"⚠️ [{short_id}] فشل استجابة الرفع لـ Archive")
+        res = requests.post(save_url, data=params, timeout=15).json()
+        if "error" in res:
+            log(f"❌ [{short_id}] خطأ VK API: {res['error'].get('error_msg')}")
             return None
+
+        upload_url = res["response"]["upload_url"]
+        owner_id = res["response"]["owner_id"]
+        video_id = res["response"]["video_id"]
+
+        log(f"⬆️ [{short_id}] جاري إرسال الملف إلى سيرفرات VK...")
+        
+        # الخطوة 2: رفع ملف الفيديو إلى السيرفر المستلم
+        with open(file_path, "rb") as f:
+            upload_res = requests.post(
+                upload_url,
+                files={"video_file": f},
+                timeout=1800  # مهلة زمنية تتناسب مع أحجام الفيديوهات
+            ).json()
+
+        if upload_res.get("video_id") or upload_res.get("result"):
+            # إنشاء رابط Embed صالح للدمج في المشغل الخاص بموقعك
+            embed_player_url = f"https://vk.com/video_ext.php?oid={owner_id}&id={video_id}"
+            log(f"✅ [{short_id}] تم الرفع إلى VK بنجاح! رابط المشغل: {embed_player_url}")
+            return embed_player_url
+        else:
+            log(f"⚠️ [{short_id}] الاستجابة من سيرفر الرفع غير مكتملة: {upload_res}")
+            return None
+
     except Exception as e:
-        log(f"❌ [{short_id}] خطأ أثناء الرفع: {e}")
+        log(f"❌ [{short_id}] خطأ أثناء الرفع إلى VK: {e}")
         return None
 
-def update_status(table_name, record_id, direct_mp4_url):
+def update_status(table_name, record_id, watch_url):
     """تحديث حالة الفيلم ورابط المشاهدة المباشر في Supabase"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
             "is_uploaded": True,
-            "watch_url": direct_mp4_url
+            "watch_url": watch_url
         }).eq("id", record_id).execute()
         log(f"✨ [{short_id}] تم التأكد وتحديث Supabase بنجاح!")
     except Exception as e:
@@ -286,15 +274,17 @@ def process_single_item(item, table_name, url_column, title_column):
             if local_file and os.path.exists(local_file):
                 
                 processed_file = apply_watermark_with_ffmpeg(local_file, record_id)
-                direct_mp4_url = upload_to_archive(processed_file, record_id, video_title=title)
+                
+                # الرفع إلى VK بدلاً من Archive
+                vk_watch_url = upload_to_vk(processed_file, record_id, video_title=title)
                 
                 if os.path.exists(local_file):
                     os.remove(local_file)
                 if processed_file != local_file and os.path.exists(processed_file):
                     os.remove(processed_file)
 
-                if direct_mp4_url:
-                    update_status(table_name, record_id, direct_mp4_url)
+                if vk_watch_url:
+                    update_status(table_name, record_id, vk_watch_url)
                     log(f"🎉 [{short_id}] اكتملت العملية بنجاح للفيلم: {title}\n")
                     return True
                 
