@@ -130,11 +130,33 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل الفيديو المحلي بأسم الـ UUID الكامل"""
+    """تحميل الفيديو المحلي مع معالجة خطأ 403 واستخدام requests للروابط المباشرة"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل...")
-    
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Referer": embed_url if embed_url else "https://google.com/",
+    }
+
+    # محاولة التحميل المباشر عبر requests أولاً لتجنب حظر HTTP 403
+    if video_url.endswith(".mp4") or "archive.org" in video_url:
+        try:
+            with requests.get(video_url, headers=headers, stream=True, timeout=30) as r:
+                if r.status_code == 200:
+                    with open(output_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                    if os.path.exists(output_path) and (os.path.getsize(output_path) / (1024 * 1024)) > 2:
+                        log(f"📦 [{short_id}] اكتمل التحميل المباشر عبر Requests بنجاح!")
+                        return output_path
+        except Exception as e:
+            log(f"⚠️ [{short_id}] فشل التحميل عبر Requests، التجربة بواسطة yt-dlp: {e}")
+
+    # المحاولة عبر yt-dlp
     ydl_opts = {
         'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -145,13 +167,7 @@ def download_video_temporarily(video_url, embed_url, record_id):
         'fragment_retries': 20,
         'skip_unavailable_fragments': True,
         'concurrent_fragment_downloads': 5,
-        'http_headers': {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": embed_url if embed_url else "https://google.com/",
-            "Origin": "https://google.com"
-        }
+        'http_headers': headers
     }
     
     try:
@@ -182,7 +198,6 @@ def upload_to_vk(file_path, record_id, video_title="Movie"):
     
     log(f"🚀 [{short_id}] الحصول على سيرفر الرفع من VK...")
     
-    # الخطوة 1: طلب رابط السيرفر المخصص للرفع من VK API
     save_url = "https://api.vk.com/method/video.save"
     params = {
         "name": display_title,
@@ -205,16 +220,14 @@ def upload_to_vk(file_path, record_id, video_title="Movie"):
 
         log(f"⬆️ [{short_id}] جاري إرسال الملف إلى سيرفرات VK...")
         
-        # الخطوة 2: رفع ملف الفيديو إلى السيرفر المستلم
         with open(file_path, "rb") as f:
             upload_res = requests.post(
                 upload_url,
                 files={"video_file": f},
-                timeout=1800  # مهلة زمنية تتناسب مع أحجام الفيديوهات
+                timeout=1800
             ).json()
 
         if upload_res.get("video_id") or upload_res.get("result"):
-            # إنشاء رابط Embed صالح للدمج في المشغل الخاص بموقعك
             embed_player_url = f"https://vk.com/video_ext.php?oid={owner_id}&id={video_id}"
             log(f"✅ [{short_id}] تم الرفع إلى VK بنجاح! رابط المشغل: {embed_player_url}")
             return embed_player_url
@@ -274,8 +287,6 @@ def process_single_item(item, table_name, url_column, title_column):
             if local_file and os.path.exists(local_file):
                 
                 processed_file = apply_watermark_with_ffmpeg(local_file, record_id)
-                
-                # الرفع إلى VK بدلاً من Archive
                 vk_watch_url = upload_to_vk(processed_file, record_id, video_title=title)
                 
                 if os.path.exists(local_file):
