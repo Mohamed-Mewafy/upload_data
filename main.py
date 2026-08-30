@@ -2,7 +2,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
-import requests
+import yt_dlp
 import internetarchive as ia
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
@@ -14,7 +14,6 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-# عدد العمليات المتوازية في نفس الوقت
 MAX_CONCURRENT_WORKERS = 3
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
@@ -83,46 +82,76 @@ def get_video_link_with_browser(embed_url):
         
     return extracted_url
 
-def upload_stream_to_archive(video_url, record_id):
-    """رفع مباشر وسريع إلى Archive.org عبر البث (Stream) بمعرف UUID فقط"""
+def download_video_temporarily(video_url, record_id):
+    """تحميل الفيديو مؤقتاً بأقصى سرعة"""
+    output_path = f"{record_id}.mp4"
+    print(f"📥 [تحميل مؤقت]: {record_id}...", flush=True)
+    
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'concurrent_fragment_downloads': 8,
+        'http_headers': {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://cimaspace.site/"
+        }
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+            
+        if os.path.exists(output_path):
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            if file_size_mb > 2:
+                print(f"📦 تم التحميل بنجاح ({file_size_mb:.2f} MB)", flush=True)
+                return output_path
+            else:
+                print(f"❌ الملف صغير جداً ({file_size_mb:.2f} MB)، الرابط تالف.", flush=True)
+                os.remove(output_path)
+    except Exception as e:
+        print(f"❌ فشل التحميل المحلي: {e}", flush=True)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+            
+    return None
+
+def upload_to_archive(file_path, record_id):
+    """رفع الملف إلى Archive.org بمعرف UUID فقط وبدون شريط تقدم متضارب"""
     identifier = f"{record_id}"
     file_name = f"{record_id}.mp4"
-    print(f"🚀 [بدء الرفع المباشر Stream] بمعرف [{identifier}] إلى Archive.org...", flush=True)
+    print(f"🚀 [جاري الرفع لـ Archive]: ID [{identifier}]...", flush=True)
     
     metadata = {
         'mediatype': 'movies',
         'collection': 'opensource_movies',
         'title': f"{record_id}",
-        'description': 'Media content.'
-    }
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://cimaspace.site/"
+        'description': 'Media Content'
     }
 
     try:
-        with requests.get(video_url, headers=headers, stream=True, timeout=30) as response:
-            response.raise_for_status()
-            
-            r = ia.upload(
-                identifier,
-                files={file_name: response.raw},
-                metadata=metadata,
-                access_key=ACCESS_KEY,
-                secret_key=SECRET_KEY,
-                retries=3
-            )
-            
-            if r and r[0].status_code == 200:
-                archive_download_url = f"https://archive.org/download/{identifier}/{file_name}"
-                print(f"✅ [تم الرفع بنجاح Stream!]: {archive_download_url}", flush=True)
-                return archive_download_url
-            else:
-                print(f"⚠️ فشل استجابة الأرشيف للرفع المباشر.", flush=True)
-                return None
+        r = ia.upload(
+            identifier,
+            files=[file_path],
+            metadata=metadata,
+            access_key=ACCESS_KEY,
+            secret_key=SECRET_KEY,
+            retries=3,
+            verbose=False
+        )
+        
+        if r and r[0].status_code == 200:
+            archive_download_url = f"https://archive.org/download/{identifier}/{file_name}"
+            print(f"✅ [تم الرفع وسيعمل المشغل بنجاح!]: {archive_download_url}", flush=True)
+            return archive_download_url
+        else:
+            print(f"⚠️ فشل استجابة الأرشيف للرفع.", flush=True)
+            return None
     except Exception as e:
-        print(f"❌ خطأ أثناء الرفع المباشر (Stream): {e}", flush=True)
+        print(f"❌ خطأ أثناء الرفع إلى Archive: {e}", flush=True)
         return None
 
 def update_status(table_name, record_id, archive_url):
@@ -137,7 +166,7 @@ def update_status(table_name, record_id, archive_url):
         print(f"❌ خطأ أثناء التحديث في Supabase: {e}", flush=True)
 
 def process_single_item(item, table_name, url_column, title_column):
-    """معالجة عنصر واحد بالكامل (صيد الرابط + الرفع المباشر)"""
+    """معالجة عنصر واحد بالكامل"""
     record_id = item.get("id")
     title = item.get(title_column) or "Unnamed Video"
     main_watch_url = item.get(url_column)
@@ -158,17 +187,23 @@ def process_single_item(item, table_name, url_column, title_column):
         print(f"⚠️ لا توجد روابط صالحة للعنصر: {title}", flush=True)
         return False
 
-    print(f"\n🎬 معالجة: {title} (ID: {record_id}) | عدد الروابط: {len(urls_to_try)}", flush=True)
+    print(f"\n🎬 معالجة: {title} (ID: {record_id})", flush=True)
     
     for link_index, current_url in enumerate(urls_to_try, 1):
         print(f"🔗 محاولة الرابط ({link_index}/{len(urls_to_try)}) للفيلم ID: {record_id}...", flush=True)
         
         direct_url = get_video_link_with_browser(current_url)
         if direct_url:
-            archive_url = upload_stream_to_archive(direct_url, record_id)
-            if archive_url:
-                update_status(table_name, record_id, archive_url)
-                return True
+            local_file = download_video_temporarily(direct_url, record_id)
+            if local_file and os.path.exists(local_file):
+                archive_url = upload_to_archive(local_file, record_id)
+                
+                if os.path.exists(local_file):
+                    os.remove(local_file)
+
+                if archive_url:
+                    update_status(table_name, record_id, archive_url)
+                    return True
                 
         print(f"⚠️ فشل الرابط الحالي للـ ID: {record_id}، تجربة الرابط التالي...", flush=True)
         
