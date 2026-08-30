@@ -98,7 +98,7 @@ async def process_movie(movie):
 
     if not embed_links:
         print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}", flush=True)
-        # علم الفيلم كـ failed لعدم تكرار جلب الفيلم
+        # تحديث الحقل لـ failed لمنع إعادة جلب نفس الفيلم الفاشل
         supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
         return
 
@@ -144,37 +144,44 @@ async def process_movie(movie):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# 6. التشغيل لمعالجة البيانات المعلقة المتاحة
+# 6. التشغيل بمعالجة جميع الدفعات المتاحة حتى الانتهاء بالكامل
 async def main():
     print("==========================================", flush=True)
-    print("📂 جلب البيانات المعلقة من Supabase...", flush=True)
+    print("📂 بدء معالجة الأفلام على دفعات متتالية...", flush=True)
     print("==========================================", flush=True)
+
+    batch_count = 0
+    total_processed = 0
 
     while True:
         try:
-            # جلب الصفوف التي لا تحتوي على رابط watch_url وليست failed
+            # جلب دفعة مكونة من 10 أفلام غير معالجة ولم تفشل بعد
             response = (
                 supabase.table("movies_cima")
                 .select("*")
                 .is_("watch_url", "null")
                 .neq("watch_url", "failed")
-                .limit(5)
+                .limit(10)
                 .execute()
             )
             movies = response.data
 
             if not movies:
-                print("✨ انتهت جميع الأفلام المعلقة بانتظار المعالجة.", flush=True)
+                print("\n✨ تم الانتهاء من معالجة كافة الأفلام المعلقة بنجاح!", flush=True)
                 break
 
-            print(f"\n📦 تم جلب دفعة جديدة تحتوي على {len(movies)} أفلام...", flush=True)
+            batch_count += 1
+            print(f"\n📦 جلب الدفعة #{batch_count} تحتوي على {len(movies)} أفلام...", flush=True)
 
             for movie in movies:
                 await process_movie(movie)
+                total_processed += 1
 
         except Exception as e:
-            print(f"⚠️ حدث خطأ في عملية الجلب: {e}", flush=True)
+            print(f"⚠️ حدث خطأ أثناء جلب الدفعة: {e}", flush=True)
             break
+
+    print(f"\n🏁 إجمالي الأفلام التي تم فحصها في هذه الجلسة: {total_processed}")
 
 if __name__ == "__main__":
     asyncio.run(main())
