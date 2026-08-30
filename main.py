@@ -4,6 +4,7 @@ import subprocess
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
+import requests
 import yt_dlp
 import internetarchive as ia
 from supabase import create_client, Client
@@ -16,10 +17,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-# اسم موقعك الذي سيظهر كعلامة مائية جديدة
+# اسم موقعك للعلامة المائية
 WATERMARK_TEXT = "CimaSpace.site"
 
-MAX_CONCURRENT_WORKERS = 2  # تقليل عدد العمال لأن معالجة FFmpeg تستهلك معالج CPU
+MAX_CONCURRENT_WORKERS = 2
 log_lock = Lock()
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
@@ -32,15 +33,11 @@ def log(msg):
         print(msg, flush=True)
 
 def apply_watermark_with_ffmpeg(input_file, record_id):
-    """تغطية العلامة المائية القديمة وإضافة اسم موقعك باستخدام FFmpeg"""
+    """تغطية العلامة المائية القديمة وإضافة اسم موقعك"""
     short_id = str(record_id)[:8]
     output_file = f"watermarked_{record_id}.mp4"
-    log(f"🎨 [{short_id}] جاري معالجة العلامة المائية بالفيديو...")
+    log(f"🎨 [{short_id}] جاري معالجة العلامة المائية...")
 
-    # فلتر FFmpeg:
-    # 1. delogo: مسح/تغبيش منطقة العلامة المائية القديمة في أعلى اليسار (x=10, y=10, width=180, height=50)
-    # 2. drawtext: كتابة اسم موقعك بنفس المكان
-    # تنبيه: يمكنك تعديل أبعاد x, y, w, h حسب موقع ومقاس العلامة المائية في فيديوهاتك
     filter_complex = (
         f"delogo=x=10:y=10:w=200:h=60,"
         f"drawtext=text='{WATERMARK_TEXT}':x=15:y=25:fontsize=22:fontcolor=white:"
@@ -53,8 +50,8 @@ def apply_watermark_with_ffmpeg(input_file, record_id):
         "-vf", filter_complex,
         "-c:v", "libx264",
         "-crf", "23",
-        "-preset", "veryfast", # سرعة المعالجة
-        "-c:a", "copy",        # نسخ الصوت بدون إعادة ترميز لتوفير الوقت
+        "-preset", "veryfast",
+        "-c:a", "copy",
         output_file
     ]
 
@@ -171,8 +168,22 @@ def download_video_temporarily(video_url, embed_url, record_id):
             
     return None
 
+def verify_direct_url(url, retries=5, delay=3):
+    """التأكد الفعلي من أن الفيديو مرفوع ويعمل برقم استجابة 200 OK قبل تحديث قاعدة البيانات"""
+    for attempt in range(retries):
+        try:
+            res = requests.head(url, allow_redirects=True, timeout=10)
+            if res.status_code == 200:
+                content_length = int(res.headers.get('Content-Length', 0))
+                if content_length > 1000000:  # التأكد أن الحجم أكبر من 1 ميجابايت
+                    return True
+        except Exception:
+            pass
+        time.sleep(delay)
+    return False
+
 def upload_to_archive(file_path, record_id, video_title="Movie"):
-    """رفع الملف لـ Archive وإرجاع رابط MP4 مباشر"""
+    """رفع الملف إلى Archive والتأكد المباشر من صحة الرابط"""
     short_id = str(record_id)[:8]
     identifier = f"cimaspace-item-{record_id}"
     target_filename = f"{identifier}.mp4"
@@ -200,24 +211,31 @@ def upload_to_archive(file_path, record_id, video_title="Movie"):
         
         if r and r[0].status_code == 200:
             direct_mp4_url = f"https://archive.org/download/{identifier}/{target_filename}"
-            log(f"✅ [{short_id}] تم الرفع بنجاح! الرابط: {direct_mp4_url}")
-            return direct_mp4_url
+            
+            # فحص تأكيدي إضافي للرابط
+            log(f"🔍 [{short_id}] التحقق من جاهزية الرابط على سيرفرات الأرشيف...")
+            if verify_direct_url(direct_mp4_url):
+                log(f"✅ [{short_id}] تم الرفع والتحقق بنجاح! الرابط: {direct_mp4_url}")
+                return direct_mp4_url
+            else:
+                log(f"⚠️ [{short_id}] الفيديو تم رفعه لكن الرابط غير جاهز بعد للتشغيل.")
+                return None
         else:
-            log(f"⚠️ [{short_id}] فشل استجابة الأرشيف")
+            log(f"⚠️ [{short_id}] فشل استجابة الرفع لـ Archive")
             return None
     except Exception as e:
         log(f"❌ [{short_id}] خطأ أثناء الرفع: {e}")
         return None
 
 def update_status(table_name, record_id, direct_mp4_url):
-    """تحديث رابط MP4 وحالة الفيلم في Supabase"""
+    """تحديث Supabase وتغيير is_uploaded إلى True حصراً عند النجاح الكامل"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
             "is_uploaded": True,
             "watch_url": direct_mp4_url
         }).eq("id", record_id).execute()
-        log(f"✨ [{short_id}] تم تحديث Supabase!")
+        log(f"✨ [{short_id}] تم التأكد وتحديث Supabase بنجاح!")
     except Exception as e:
         log(f"❌ [{short_id}] خطأ في التحديث: {e}")
 
@@ -256,18 +274,16 @@ def process_single_item(item, table_name, url_column, title_column):
             local_file = download_video_temporarily(direct_url, embed_src, record_id)
             if local_file and os.path.exists(local_file):
                 
-                # 1. تطبيق FFmpeg لتغطية العلامة المائية القديمة وطباعة اسم موقعك
                 processed_file = apply_watermark_with_ffmpeg(local_file, record_id)
-                
-                # 2. رفع الملف النهائي
                 direct_mp4_url = upload_to_archive(processed_file, record_id, video_title=title)
                 
-                # 3. تنظيف الملفات المؤقتة
+                # حذف الملفات المؤقتة
                 if os.path.exists(local_file):
                     os.remove(local_file)
                 if processed_file != local_file and os.path.exists(processed_file):
                     os.remove(processed_file)
 
+                # التحديث يحدث فقط إذا أرجع upload_to_archive رابطاً مؤكداً ومفحوصاً
                 if direct_mp4_url:
                     update_status(table_name, record_id, direct_mp4_url)
                     log(f"🎉 [{short_id}] اكتملت العملية بنجاح للفيلم: {title}\n")
@@ -309,7 +325,7 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
 def main():
     process_table_parallel("movies_cima", "watch_url", "title", limit=10)
     process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
-    process_table_parallel("tv_series", "watch_url", "title", filter_column="is_uploaded", limit=10)
+    process_table_parallel("tv_series", "watch_url", "title", limit=10)
     process_table_parallel("episodes_cima", "watch_url", "title", limit=10)
     
     log("\n🏁 انتهت كل العمليات!")
