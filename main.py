@@ -132,7 +132,7 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل الفيديو المحلي مع حماية الهيدرز لتفادي 403"""
+    """تحميل الفيديو المحلي بأسم الـ UUID الكامل"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل...")
@@ -177,7 +177,7 @@ def download_video_temporarily(video_url, embed_url, record_id):
     return None
 
 def verify_direct_url(url, retries=10, delay=6):
-    """الانتظار الذكي والتأكد الفعلي من جاهزية رابط MP4 المباشر على سيرفرات أرشيف"""
+    """الانتظار والتأكد الفعلي من جاهزية رابط MP4 المباشر على أرشيف"""
     for attempt in range(retries):
         try:
             res = requests.head(url, allow_redirects=True, timeout=10)
@@ -191,11 +191,15 @@ def verify_direct_url(url, retries=10, delay=6):
     return False
 
 def upload_to_archive(file_path, record_id, video_title="Movie"):
-    """رفع الملف إلى Archive والتأكد المباشر من صحة الرابط"""
+    """رفع الملف إلى Archive بإنشاء identifier فريد لتجنب حظر Access Denied"""
     short_id = str(record_id)[:8]
-    identifier = f"cimaspace-item-{record_id}"
-    target_filename = f"{identifier}.mp4"
-    log(f"🚀 [{short_id}] جاري الرفع لـ Archive...")
+    # اسم الملف سيكون الـ UUID الكامل
+    target_filename = f"{record_id}.mp4"
+    # معرف الحاوية أضيف له طابع زمني لمنع التعارض عند المحاولات المتكررة
+    timestamp = int(time.time())
+    identifier = f"cimaspace-item-{record_id}-{timestamp}"
+    
+    log(f"🚀 [{short_id}] جاري الرفع لـ Archive باسم: {target_filename}...")
     
     display_title = f"{video_title} - CimaSpace"
 
@@ -235,7 +239,7 @@ def upload_to_archive(file_path, record_id, video_title="Movie"):
         return None
 
 def update_status(table_name, record_id, direct_mp4_url):
-    """تحديث حالة الفيلم في Supabase"""
+    """تحديث حالة الفيلم ورابط المشاهدة المباشر في Supabase"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
