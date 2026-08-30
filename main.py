@@ -128,9 +128,9 @@ async def process_movie(movie):
         if direct_archive_mp4:
             print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}", flush=True)
 
-            # تحديث الجدول بنسخة السكربت الأصلية (stream_url و status)
+            # التحديث باستخدام اسم العمود الصحيح watch_url
             supabase.table("movies_cima").update({
-                "stream_url": direct_archive_mp4,
+                "watch_url": direct_archive_mp4,
                 "status": "completed"
             }).eq("id", movie_id).execute()
             print(f"💾 تم تحديث Supabase بنجاح.", flush=True)
@@ -149,11 +149,11 @@ async def main():
 
     while True:
         try:
-            # نفس الاستعلام الأصلي الخاص بك بفلترة stream_url is null
+            # استعلام يعتمد على العمود watch_url
             response = (
                 supabase.table("movies_cima")
                 .select("*")
-                .is_("stream_url", "null")
+                .is_("watch_url", "null")
                 .limit(5)
                 .execute()
             )
@@ -170,7 +170,6 @@ async def main():
 
         except Exception as e:
             print(f"⚠️ حدث خطأ في عملية الجلب: {e}", flush=True)
-            print("💡 تنبيه: تأكد من وجود عمود 'stream_url' داخل جدول 'movies_cima' في Supabase.", flush=True)
             break
 
 if __name__ == "__main__":
