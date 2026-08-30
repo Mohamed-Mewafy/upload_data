@@ -1,172 +1,275 @@
 import os
-import sys
-import asyncio
-import subprocess
+import time
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import urllib3
+import yt_dlp
+import internetarchive as ia
 from supabase import create_client, Client
-from playwright.async_api import async_playwright
-from internetarchive import upload
+from playwright.sync_api import sync_playwright
 
-# 1. إعداد متغيرات البيئة ورابط Supabase
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-IA_ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
-IA_SECRET_KEY = os.environ.get("IA_SECRET_KEY")
+ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
+SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ خطأ: يرجى التأكد من تعيين SUPABASE_URL و SUPABASE_KEY")
+MAX_CONCURRENT_WORKERS = 3
+log_lock = Lock()
+
+if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
+    raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 2. استخراج رابط MP4 المباشر من سيرفرات الإمبد باستخدام Playwright
-async def get_direct_video_url(embed_url):
-    direct_url = None
-    async with async_playwright() as p:
-        # تشغيل المتصفح بوضع الخفاء مع إعدادات تخفيف الحمل
-        browser = await p.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox']
-        )
-        context = await browser.new_context()
-        page = await context.new_page()
+def log(msg):
+    with log_lock:
+        print(msg, flush=True)
 
-        # حجب الصور والملفات الثقيلة لتسريع عملية الفحص
-        async def block_resources(route):
-            if route.request.resource_type in ["image", "stylesheet", "font"]:
-                await route.abort()
+def get_video_link_with_browser(embed_url, item_id):
+    """استخراج رابط الفيديو المباشر بسرعات متناهية مع تأمين التوازي"""
+    short_id = str(item_id)[:8]
+    log(f"🌐 [{short_id}] تجربة الرابط: {embed_url}")
+    extracted_url = None
+    
+    try:
+        # تشغيل Playwright مع التوازي بأمان
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage", 
+                    "--no-sandbox", 
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled"
+                ]
+            )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                extra_http_headers={"Referer": embed_url},
+                viewport={"width": 1280, "height": 720}
+            )
+            page = context.new_page()
+            
+            # حجب الصور والخطوط لتقليل التحميل وتسريع الفحص
+            def block_heavy_resources(route):
+                if route.request.resource_type in ["image", "stylesheet", "font"]:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            page.route("**/*", block_heavy_resources)
+            
+            def check_url(url):
+                nonlocal extracted_url
+                url_lower = url.lower()
+                if any(ext in url_lower for ext in ['.m3u8', '.mp4', 'video/mp4']) and not any(ign in url_lower for ign in ['chunk', 'ads', 'seg', 'analytics', 'googlevideo']):
+                    if not extracted_url:
+                        extracted_url = url
+                        log(f"🎯 [{short_id}] تم صيد الرابط المباشر")
+
+            page.on("request", lambda req: check_url(req.url))
+            page.on("response", lambda res: check_url(res.url))
+            
+            try:
+                page.goto(embed_url, timeout=12000, wait_until="domcontentloaded")
+                
+                try:
+                    page.evaluate("""() => {
+                        const elements = document.querySelectorAll('video, .play-btn, [class*="play"], [id*="play"], .jw-display-icon-container, iframe');
+                        elements.forEach(el => el.click());
+                    }""")
+                except Exception:
+                    pass
+                
+                for _ in range(4):
+                    if extracted_url:
+                        break
+                    time.sleep(0.5)
+                    
+            except Exception:
+                log(f"⚠️ [{short_id}] تجاوز الرابط (تخطى المهلة 12s)")
+                
+            browser.close()
+    except Exception as e:
+        log(f"❌ [{short_id}] خطأ في محرك Playwright: {e}")
+        
+    return extracted_url, embed_url
+
+def download_video_temporarily(video_url, embed_url, record_id):
+    """تحميل صاروخي بأقصى سرعة شبكة ممكّنة"""
+    short_id = str(record_id)[:8]
+    output_path = f"{record_id}.mp4"
+    log(f"📥 [{short_id}] بدء التحميل السريع جداً...")
+    
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'retries': 10,
+        'fragment_retries': 20,
+        'skip_unavailable_fragments': True,
+        'concurrent_fragment_downloads': 8,
+        'http_headers': {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Referer": embed_url
+        }
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+            
+        if os.path.exists(output_path):
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            if file_size_mb > 2:
+                log(f"📦 [{short_id}] اكتمل التحميل المحلي بنجاح ({file_size_mb:.1f} MB)")
+                return output_path
             else:
-                await route.continue_()
-
-        await page.route("**/*", block_resources)
-
-        # التقاط طلبات الشبكة للبحث عن امتداد الفيديو المباشر
-        def handle_request(request):
-            nonlocal direct_url
-            url = request.url
-            if (".mp4" in url or ".m3u8" in url) and not direct_url:
-                if "googlevideo" not in url and "analytics" not in url:
-                    direct_url = url
-
-        page.on("request", handle_request)
-
-        try:
-            await page.goto(embed_url, wait_until="domcontentloaded", timeout=20000)
-            for _ in range(12):  # الانتظار لمدة تصل إلى 6 ثوانٍ للتقاط الفيديو
-                if direct_url:
-                    break
-                await asyncio.sleep(0.5)
-        except Exception as e:
-            pass
-        finally:
-            await browser.close()
-
-    return direct_url
-
-# 3. تحميل الفيديو إلى السيرفر المحتوي على السكربت باستخدام yt-dlp
-def download_video(video_url, output_path):
-    print(f"⬇️ جاري تنزيل الفيديو إلى السيرفر المحلي...")
-    command = [
-        "yt-dlp",
-        "-f", "best[ext=mp4]/best",
-        "-o", output_path,
-        "--no-playlist",
-        video_url
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    return result.returncode == 0
-
-# 4. رفع الملف إلى Internet Archive وتوليد الرابط المباشر
-def upload_to_archive(file_path, identifier, title):
-    print(f"🚀 جاري الرفع إلى Internet Archive...")
-    file_name = os.path.basename(file_path)
-    
-    # الرفع عبر مكتبة internetarchive
-    status = upload(
-        identifier,
-        files=[file_path],
-        metadata={'title': title, 'mediatype': 'movies'},
-        access_key=IA_ACCESS_KEY,
-        secret_key=IA_SECRET_KEY
-    )
-    
-    if status[0].status_code == 200:
-        # تركيب الرابط المباشر للملف
-        direct_archive_url = f"https://archive.org/download/{identifier}/{file_name}"
-        return direct_archive_url
+                log(f"⚠️ [{short_id}] الملف غير صالح (أقل من 2MB)")
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+    except Exception as e:
+        log(f"❌ [{short_id}] فشل التحميل المحلي: {e}")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+            
     return None
 
-# 5. الدالة الرئيسية لمعالجة كل فيلم
-async def process_movie(movie):
-    movie_id = movie.get("id")
-    title = movie.get("title", f"movie_{movie_id}")
-    embed_links = movie.get("embed_links", [])
-
-    print(f"\n🎬 [ID: {movie_id}] بدء معالجة الفيلم: {title}")
-
-    if not embed_links:
-        print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}")
-        return
-
-    direct_source_url = None
-    for index, embed_url in enumerate(embed_links, 1):
-        print(f"🔗 تجربة الرابط ({index}/{len(embed_links)}): {embed_url}")
-        direct_source_url = await get_direct_video_url(embed_url)
-        if direct_source_url:
-            print(f"✅ تم العثور على مصدر الفيديو المباشر!")
-            break
-
-    if not direct_source_url:
-        print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.")
-        return
-
-    # مسار التخزين المؤقت للفيلم
-    clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '_')).rstrip()
-    filename = f"{clean_title}.mp4"
-    temp_path = os.path.join("/tmp", filename)
-    identifier = f"cima_space_{movie_id}"
+def upload_to_archive(file_path, record_id):
+    """رفع الملف إلى Archive.org"""
+    short_id = str(record_id)[:8]
+    identifier = f"cimaspace-item-{record_id}"
+    log(f"🚀 [{short_id}] جاري الرفع لـ Archive...")
+    
+    metadata = {
+        'mediatype': 'movies',
+        'collection': 'opensource_movies',
+        'title': f"Media Item {record_id}",
+        'description': 'CimaSpace Video Stream'
+    }
 
     try:
-        # أ) التحميل
-        download_success = download_video(direct_source_url, temp_path)
-        if not download_success or not os.path.exists(temp_path):
-            print(f"❌ فشل تحميل ملف الفيديو.")
-            return
-
-        # ب) الرفع للحصول على رابط .mp4
-        direct_archive_mp4 = upload_to_archive(temp_path, identifier, title)
-
-        if direct_archive_mp4:
-            print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}")
-
-            # ج) تحديث قاعدة بيانات Supabase بالرابط المباشر في عمود watch_url
-            supabase.table("movies_cima").update({
-                "watch_url": direct_archive_mp4,
-                "status": "completed"
-            }).eq("id", movie_id).execute()
-            print(f"💾 تم تحديث Supabase بنجاح.")
+        r = ia.upload(
+            identifier,
+            files=[file_path],
+            metadata=metadata,
+            access_key=ACCESS_KEY,
+            secret_key=SECRET_KEY,
+            retries=3,
+            verbose=False
+        )
+        
+        if r and r[0].status_code == 200:
+            archive_embed_url = f"https://archive.org/embed/{identifier}"
+            log(f"✅ [{short_id}] تم الرفع بنجاح! الرابط: {archive_embed_url}")
+            return archive_embed_url
         else:
-            print(f"❌ فشلت عملية الرفع لـ Internet Archive.")
+            log(f"⚠️ [{short_id}] فشل استجابة الأرشيف")
+            return None
+    except Exception as e:
+        log(f"❌ [{short_id}] خطأ أثناء الرفع: {e}")
+        return None
 
-    finally:
-        # د) حذف الملف المؤقت بعد الانتهاء لتوفير المساحة
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+def update_status(table_name, record_id, archive_url):
+    """تحديث حالة الفيلم في Supabase"""
+    short_id = str(record_id)[:8]
+    try:
+        supabase.table(table_name).update({
+            "is_uploaded": True,
+            "watch_url": archive_url
+        }).eq("id", record_id).execute()
+        log(f"✨ [{short_id}] تم تحديث Supabase!")
+    except Exception as e:
+        log(f"❌ [{short_id}] خطأ في التحديث: {e}")
 
-# 6. التشغيل التنفيذي للمشروع
-async def main():
-    print("==========================================")
-    print("📂 جلب البيانات المعلقة من Supabase...")
-    print("==========================================")
+def process_single_item(item, table_name, url_column, title_column):
+    record_id = item.get("id")
+    if not record_id:
+        return False
+        
+    short_id = str(record_id)[:8]
+    title = item.get(title_column) or "Unnamed Video"
+    main_watch_url = item.get(url_column)
+    direct_links_json = item.get("direct_links") or {}
+    
+    urls_to_try = []
+    if main_watch_url:
+        urls_to_try.append(main_watch_url)
+        
+    if isinstance(direct_links_json, dict):
+        streaming_list = direct_links_json.get("streaming_links", [])
+        if isinstance(streaming_list, list):
+            for alt_url in streaming_list:
+                if alt_url and alt_url not in urls_to_try:
+                    urls_to_try.append(alt_url)
 
-    # جلب الأفلام التي لم تُعالج بعد (watch_url is null)
-    response = supabase.table("movies_cima").select("*").is_("watch_url", "null").limit(100).execute()
-    movies = response.data
+    if not urls_to_try:
+        log(f"⚠️ [{short_id}] لا توجد روابط صالحة للفيلم: {title}")
+        return False
 
-    if not movies:
-        print("✨ لا توجد أفلام معلقة بانتظار المعالجة.")
+    log(f"\n🎬 [{short_id}] بدء المعالجة: {title}")
+    
+    for link_index, current_url in enumerate(urls_to_try, 1):
+        log(f"🔗 [{short_id}] تجربة الرابط ({link_index}/{len(urls_to_try)})...")
+        
+        direct_url, embed_src = get_video_link_with_browser(current_url, record_id)
+        if direct_url:
+            local_file = download_video_temporarily(direct_url, embed_src, record_id)
+            if local_file and os.path.exists(local_file):
+                archive_url = upload_to_archive(local_file, record_id)
+                
+                if os.path.exists(local_file):
+                    os.remove(local_file)
+
+                if archive_url:
+                    update_status(table_name, record_id, archive_url)
+                    log(f"🎉 [{short_id}] اكتملت العملية بنجاح للفيلم: {title}\n")
+                    return True
+                
+        log(f"🔄 [{short_id}] الانتقال للرابط التالي...")
+        
+    log(f"❌ [{short_id}] فشلت جميع الروابط المتاحة للفيلم: {title}\n")
+    return False
+
+def process_table_parallel(table_name, url_column, title_column="title", limit=10):
+    log(f"\n==========================================")
+    log(f"📂 فحص الجدول: {table_name}")
+    log(f"==========================================")
+    
+    try:
+        response = supabase.table(table_name).select(f"id, {title_column}, {url_column}, direct_links").eq("is_uploaded", False).limit(limit).execute()
+        items = response.data
+    except Exception as e:
+        log(f"❌ خطأ في جلب البيانات من {table_name}: {e}")
         return
 
-    for movie in movies:
-        await process_movie(movie)
+    if not items:
+        log(f"🎉 لا توجد عناصر جديدة في جدول {table_name}.")
+        return
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        futures = [
+            executor.submit(process_single_item, item, table_name, url_column, title_column) 
+            for item in items
+        ]
+        
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                log(f"❌ خطأ غير متوقع في المهمة: {e}")
+
+def main():
+    process_table_parallel("movies_cima", "watch_url", "title", limit=1000)
+    process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
+    process_table_parallel("tv_series", "watch_url", "title", limit=10)
+    process_table_parallel("episodes_cima", "watch_url", "title", limit=10)
+    
+    log("\n🏁 انتهت كل العمليات!")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
