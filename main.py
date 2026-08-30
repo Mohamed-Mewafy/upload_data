@@ -55,7 +55,8 @@ def get_video_link_with_browser(embed_url):
             page.on("response", lambda res: check_url(res.url))
             
             try:
-                page.goto(embed_url, timeout=30000, wait_until="domcontentloaded")
+                # زيادة وقت التايم آوت إلى 60 ثانية لتفادي Timeout Error
+                page.goto(embed_url, timeout=60000, wait_until="domcontentloaded")
                 for i in range(3):
                     try:
                         page.evaluate("""() => {
@@ -74,7 +75,7 @@ def get_video_link_with_browser(embed_url):
                     if extracted_url:
                         break
             except Exception as e:
-                print(f"⚠️ خطأ أثناء تصفح الصفحة: {e}", flush=True)
+                print(f"⚠️ تجاوز الرابط بسبب خطأ في التحميل/التايم آوت: {e}", flush=True)
                 
             browser.close()
     except Exception as e:
