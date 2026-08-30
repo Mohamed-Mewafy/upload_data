@@ -28,13 +28,12 @@ def log(msg):
         print(msg, flush=True)
 
 def get_video_link_with_browser(embed_url, item_id):
-    """استخراج رابط الفيديو المباشر بسرعات متناهية مع تأمين التوازي"""
+    """استخراج رابط الفيديو المباشر بسرعات متناهية ودون تعارض الـ Routing"""
     short_id = str(item_id)[:8]
     log(f"🌐 [{short_id}] تجربة الرابط: {embed_url}")
     extracted_url = None
     
     try:
-        # تشغيل Playwright مع التوازي بأمان
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -42,7 +41,8 @@ def get_video_link_with_browser(embed_url, item_id):
                     "--disable-dev-shm-usage", 
                     "--no-sandbox", 
                     "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled"
+                    "--disable-blink-features=AutomationControlled",
+                    "--blink-settings=imagesEnabled=false"  # تعطيل الصور من المحرك مباشرة لتقليل استهلاك الموارد
                 ]
             )
             context = browser.new_context(
@@ -51,15 +51,6 @@ def get_video_link_with_browser(embed_url, item_id):
                 viewport={"width": 1280, "height": 720}
             )
             page = context.new_page()
-            
-            # حجب الصور والخطوط لتقليل التحميل وتسريع الفحص
-            def block_heavy_resources(route):
-                if route.request.resource_type in ["image", "stylesheet", "font"]:
-                    route.abort()
-                else:
-                    route.continue_()
-
-            page.route("**/*", block_heavy_resources)
             
             def check_url(url):
                 nonlocal extracted_url
@@ -264,7 +255,7 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
                 log(f"❌ خطأ غير متوقع في المهمة: {e}")
 
 def main():
-    process_table_parallel("movies_cima", "watch_url", "title", limit=1000)
+    process_table_parallel("movies_cima", "watch_url", "title", limit=10)
     process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
     process_table_parallel("tv_series", "watch_url", "title", limit=10)
     process_table_parallel("episodes_cima", "watch_url", "title", limit=10)
