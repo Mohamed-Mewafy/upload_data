@@ -333,7 +333,7 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
                 log(f"❌ خطأ غير متوقع في المهمة: {e}")
 
 def main():
-    process_table_parallel("movies_cima", "watch_url", "title", limit=10)
+    process_table_parallel("movies_cima", "watch_url", "title", limit=1000)
     process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
     process_table_parallel("tv_series", "watch_url", "title", limit=10)
     process_table_parallel("episodes_cima", "watch_url", "title", limit=10)
