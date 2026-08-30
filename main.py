@@ -104,6 +104,7 @@ async def process_movie(movie):
 
     if not embed_links:
         print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}")
+        supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
         return
 
     direct_source_url = None
@@ -116,6 +117,7 @@ async def process_movie(movie):
 
     if not direct_source_url:
         print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.")
+        supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
         return
 
     # مسار التخزين المؤقت للفيلم
@@ -129,6 +131,7 @@ async def process_movie(movie):
         download_success = download_video(direct_source_url, temp_path)
         if not download_success or not os.path.exists(temp_path):
             print(f"❌ فشل تحميل ملف الفيديو.")
+            supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
             return
 
         # ب) الرفع للحصول على رابط .mp4
@@ -145,28 +148,46 @@ async def process_movie(movie):
             print(f"💾 تم تحديث Supabase بنجاح.")
         else:
             print(f"❌ فشلت عملية الرفع لـ Internet Archive.")
+            supabase.table("movies_cima").update({"status": "failed"}).eq("id", movie_id).execute()
 
     finally:
         # د) حذف الملف المؤقت بعد الانتهاء لتوفير المساحة
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# 6. التشغيل التنفيذي للمشروع
+# 6. التشغيل التنفيذي للمشروع بشكل مستمر (Infinite Loop)
 async def main():
     print("==========================================")
-    print("📂 جلب البيانات المعلقة من Supabase...")
+    print("🚀 بدء محرك المعالجة المستمرة لـ CimaSpace...")
     print("==========================================")
 
-    # جلب الأفلام التي لم تُعالج بعد (status is null أو pending)
-    response = supabase.table("movies_cima").select("*").is_("stream_url", "null").limit(5).execute()
-    movies = response.data
+    while True:
+        try:
+            # جلب الدفعة التالية من الأفلام المعلقة (stream_url is null و status ليست failed)
+            response = (
+                supabase.table("movies_cima")
+                .select("*")
+                .is_("stream_url", "null")
+                .neq("status", "failed")
+                .limit(10)
+                .execute()
+            )
+            movies = response.data
 
-    if not movies:
-        print("✨ لا توجد أفلام معلقة بانتظار المعالجة.")
-        return
+            if not movies:
+                print("\n✨ لا توجد أفلام معلقة حالياً. الانتظار 60 ثانية قبل الفحص التلقائي...")
+                await asyncio.sleep(60)
+                continue
 
-    for movie in movies:
-        await process_movie(movie)
+            print(f"\n📦 تم جلب دفعة جديدة تحتوي على {len(movies)} أفلام...")
+
+            for movie in movies:
+                await process_movie(movie)
+
+        except Exception as e:
+            print(f"\n⚠️ حدث خطأ في حلقة التشغيل الرئيسية: {e}")
+            print("الانتظار 30 ثانية قبل إعادة المحاولة...")
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
