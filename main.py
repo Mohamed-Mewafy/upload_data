@@ -24,7 +24,7 @@ if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def log(msg):
-    """دالة طباعة آمنة لمنع تداخل أسطر السكربت أثناء المعالجة المتوازية"""
+    """طباعة آمنة وموحدة لمنع تداخل أسطر السكربت أثناء العمل بالتوازي"""
     with log_lock:
         print(msg, flush=True)
 
@@ -47,7 +47,7 @@ def get_video_link_with_browser(embed_url, item_id):
             )
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                extra_http_headers={"Referer": "https://cimaspace.site/"},
+                extra_http_headers={"Referer": embed_url},
                 viewport={"width": 1280, "height": 720}
             )
             page = context.new_page()
@@ -77,16 +77,16 @@ def get_video_link_with_browser(embed_url, item_id):
                     if extracted_url:
                         break
             except Exception:
-                log(f"⚠️ [{short_id}] انتهت مهلة انتظر الصفحة (Timeout)")
+                log(f"⚠️ [{short_id}] انتهت مهلة انتظار الصفحة (Timeout)")
                 
             browser.close()
     except Exception:
         log(f"❌ [{short_id}] خطأ في محرك Playwright")
         
-    return extracted_url
+    return extracted_url, embed_url
 
-def download_video_temporarily(video_url, record_id):
-    """تحميل الفيديو مؤقتاً بصمت مع إخفاء الأخطاء المزعجة"""
+def download_video_temporarily(video_url, embed_url, record_id):
+    """تحميل الفيديو مؤقتاً ومعالجة خطأ 403 بحقن Referer الصفحة الأصلية"""
     short_id = record_id[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل المحلي...")
@@ -102,8 +102,8 @@ def download_video_temporarily(video_url, record_id):
         'skip_unavailable_fragments': True,
         'concurrent_fragment_downloads': 3,
         'http_headers': {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://cimaspace.site/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Referer": embed_url
         }
     }
     
@@ -128,7 +128,7 @@ def download_video_temporarily(video_url, record_id):
     return None
 
 def upload_to_archive(file_path, record_id):
-    """رفع الملف لـ Archive وإرجاع رابط Embed أنيق"""
+    """رفع الملف إلى Archive.org وإرجاع رابط الـ Embed الثابت"""
     short_id = record_id[:8]
     identifier = f"cimaspace-item-{record_id}"
     log(f"🚀 [{short_id}] جاري الرفع إلى Internet Archive...")
@@ -175,7 +175,7 @@ def update_status(table_name, record_id, archive_url):
         log(f"❌ [{short_id}] خطأ في تحديث Supabase: {e}")
 
 def process_single_item(item, table_name, url_column, title_column):
-    """معالجة عنصر مع طباعة نظيفة ومحددة"""
+    """معالجة عنصر واحد بالكامل"""
     record_id = item.get("id")
     short_id = record_id[:8]
     title = item.get(title_column) or "Unnamed Video"
@@ -202,9 +202,9 @@ def process_single_item(item, table_name, url_column, title_column):
     for link_index, current_url in enumerate(urls_to_try, 1):
         log(f"🔗 [{short_id}] تجربة الرابط ({link_index}/{len(urls_to_try)})...")
         
-        direct_url = get_video_link_with_browser(current_url, record_id)
+        direct_url, embed_src = get_video_link_with_browser(current_url, record_id)
         if direct_url:
-            local_file = download_video_temporarily(direct_url, record_id)
+            local_file = download_video_temporarily(direct_url, embed_src, record_id)
             if local_file and os.path.exists(local_file):
                 archive_url = upload_to_archive(local_file, record_id)
                 
