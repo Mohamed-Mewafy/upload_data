@@ -158,7 +158,7 @@ async def main():
     print("==========================================")
 
     # جلب الأفلام التي لم تُعالج بعد (status is null أو pending)
-    response = supabase.table("movies_cima").select("*").is_("stream_url", "null").limit(5).execute()
+    response = supabase.table("movies_cima").select("*").is_("stream_url", "null").limit(100).execute()
     movies = response.data
 
     if not movies:
