@@ -17,7 +17,6 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-# اسم موقعك للعلامة المائية الجديدة
 WATERMARK_TEXT = "CimaSpace.site"
 
 MAX_CONCURRENT_WORKERS = 2
@@ -60,18 +59,19 @@ def apply_watermark_with_ffmpeg(input_file, record_id):
         if os.path.exists(output_file):
             log(f"✨ [{short_id}] تمت معالجة العلامة المائية بنجاح!")
             return output_file
+    except FileNotFoundError:
+        log(f"⚠️ [{short_id}] برنامج FFmpeg غير مثبت، سيتم تجاوز معالجة العلامة المائية.")
     except Exception as e:
-        log(f"⚠️ [{short_id}] تعذر تطبيق FFmpeg، سيتم استخدام الملف الأصلي: {e}")
+        log(f"⚠️ [{short_id}] تعذر تطبيق FFmpeg: {e}")
     
     return input_file
 
 def get_video_link_with_browser(embed_url, item_id):
-    """استخراج رابط الفيديو المباشر عبر Playwright مع التجاوز والفلترة"""
+    """استخراج رابط الفيديو المباشر عبر Playwright"""
     short_id = str(item_id)[:8]
     log(f"🌐 [{short_id}] تجربة الرابط: {embed_url}")
     extracted_url = None
     
-    # تجنب إعادة معالجة وروابط الأرشيف القديمة
     if "archive.org" in embed_url.lower():
         log(f"⚠️ [{short_id}] تخطي رابط Archive مكرر")
         return None, embed_url
@@ -132,7 +132,7 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل الفيديو المحلي مع حماية الهيدرز ضد خطأ HTTP 403 Forbidden"""
+    """تحميل الفيديو المحلي مع حماية الهيدرز لتفادي 403"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل...")
@@ -176,8 +176,8 @@ def download_video_temporarily(video_url, embed_url, record_id):
             
     return None
 
-def verify_direct_url(url, retries=5, delay=3):
-    """التأكد الفعلي من أن الفيديو مرفوع ويعمل برقم استجابة 200 OK قبل تحديث قاعدة البيانات"""
+def verify_direct_url(url, retries=10, delay=6):
+    """الانتظار الذكي والتأكد الفعلي من جاهزية رابط MP4 المباشر على سيرفرات أرشيف"""
     for attempt in range(retries):
         try:
             res = requests.head(url, allow_redirects=True, timeout=10)
@@ -191,7 +191,7 @@ def verify_direct_url(url, retries=5, delay=3):
     return False
 
 def upload_to_archive(file_path, record_id, video_title="Movie"):
-    """رفع الملف إلى Archive والتأكد المباشر من صحة الرابط وسرعته"""
+    """رفع الملف إلى Archive والتأكد المباشر من صحة الرابط"""
     short_id = str(record_id)[:8]
     identifier = f"cimaspace-item-{record_id}"
     target_filename = f"{identifier}.mp4"
@@ -225,7 +225,7 @@ def upload_to_archive(file_path, record_id, video_title="Movie"):
                 log(f"✅ [{short_id}] تم الرفع والتحقق بنجاح! الرابط: {direct_mp4_url}")
                 return direct_mp4_url
             else:
-                log(f"⚠️ [{short_id}] الفيديو تم رفعه لكن الرابط غير جاهز بعد للتشغيل.")
+                log(f"⚠️ [{short_id}] الفيديو تم رفعه لكن استغرق وقت معالجة أكثر من المتوقع.")
                 return None
         else:
             log(f"⚠️ [{short_id}] فشل استجابة الرفع لـ Archive")
@@ -235,7 +235,7 @@ def upload_to_archive(file_path, record_id, video_title="Movie"):
         return None
 
 def update_status(table_name, record_id, direct_mp4_url):
-    """تحديث Supabase وتغيير is_uploaded إلى True حصراً عند النجاح الكامل"""
+    """تحديث حالة الفيلم في Supabase"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
@@ -284,13 +284,11 @@ def process_single_item(item, table_name, url_column, title_column):
                 processed_file = apply_watermark_with_ffmpeg(local_file, record_id)
                 direct_mp4_url = upload_to_archive(processed_file, record_id, video_title=title)
                 
-                # حذف الملفات المؤقتة
                 if os.path.exists(local_file):
                     os.remove(local_file)
                 if processed_file != local_file and os.path.exists(processed_file):
                     os.remove(processed_file)
 
-                # التحديث يحدث فقط في حال تأكيد جهوزية الرابط
                 if direct_mp4_url:
                     update_status(table_name, record_id, direct_mp4_url)
                     log(f"🎉 [{short_id}] اكتملت العملية بنجاح للفيلم: {title}\n")
