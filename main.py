@@ -28,7 +28,7 @@ def log(msg):
         print(msg, flush=True)
 
 def get_video_link_with_browser(embed_url, item_id):
-    """استخراج رابط الفيديو المباشر بسرعات متناهية ودون تعارض الـ Routing"""
+    """استخراج رابط الفيديو المباشر عبر Playwright"""
     short_id = str(item_id)[:8]
     log(f"🌐 [{short_id}] تجربة الرابط: {embed_url}")
     extracted_url = None
@@ -42,7 +42,7 @@ def get_video_link_with_browser(embed_url, item_id):
                     "--no-sandbox", 
                     "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
-                    "--blink-settings=imagesEnabled=false"  # تعطيل الصور من المحرك مباشرة لتقليل استهلاك الموارد
+                    "--blink-settings=imagesEnabled=false"
                 ]
             )
             context = browser.new_context(
@@ -89,13 +89,14 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل صاروخي بأقصى سرعة شبكة ممكّنة"""
+    """تحميل الفيديو وتجهيزه بترميز H.264 / AAC ليعمل على جميع المشغلات"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل السريع جداً...")
     
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        # إجبار التنزيل بصيغ متوافقة مع مشغلات التطبيقات (H.264 + AAC)
+        'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best',
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
@@ -131,9 +132,10 @@ def download_video_temporarily(video_url, embed_url, record_id):
     return None
 
 def upload_to_archive(file_path, record_id):
-    """رفع الملف إلى Archive.org"""
+    """رفع الملف إلى Archive.org وتوليد رابط MP4 مباشر بدلاً من Embed"""
     short_id = str(record_id)[:8]
     identifier = f"cimaspace-item-{record_id}"
+    target_filename = f"{identifier}.mp4"
     log(f"🚀 [{short_id}] جاري الرفع لـ Archive...")
     
     metadata = {
@@ -144,9 +146,10 @@ def upload_to_archive(file_path, record_id):
     }
 
     try:
+        # رفع الملف وتسميته برقم المعرف لتوليد رابط MP4 ثابت وسهل التنبؤ به
         r = ia.upload(
             identifier,
-            files=[file_path],
+            files={target_filename: file_path},
             metadata=metadata,
             access_key=ACCESS_KEY,
             secret_key=SECRET_KEY,
@@ -155,9 +158,10 @@ def upload_to_archive(file_path, record_id):
         )
         
         if r and r[0].status_code == 200:
-            archive_embed_url = f"https://archive.org/embed/{identifier}"
-            log(f"✅ [{short_id}] تم الرفع بنجاح! الرابط: {archive_embed_url}")
-            return archive_embed_url
+            # رابط الـ MP4 المباشر المخزن بالسيرفر (صالح للتشغيل المباشر داخل التطبيقات)
+            direct_mp4_url = f"https://archive.org/download/{identifier}/{target_filename}"
+            log(f"✅ [{short_id}] تم الرفع بنجاح! رابط MP4 المباشر: {direct_mp4_url}")
+            return direct_mp4_url
         else:
             log(f"⚠️ [{short_id}] فشل استجابة الأرشيف")
             return None
@@ -165,15 +169,15 @@ def upload_to_archive(file_path, record_id):
         log(f"❌ [{short_id}] خطأ أثناء الرفع: {e}")
         return None
 
-def update_status(table_name, record_id, archive_url):
-    """تحديث حالة الفيلم في Supabase"""
+def update_status(table_name, record_id, direct_mp4_url):
+    """تحديث رابط MP4 المباشر وحالة الفيلم في Supabase"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
             "is_uploaded": True,
-            "watch_url": archive_url
+            "watch_url": direct_mp4_url
         }).eq("id", record_id).execute()
-        log(f"✨ [{short_id}] تم تحديث Supabase!")
+        log(f"✨ [{short_id}] تم تحديث Supabase برابط MP4!")
     except Exception as e:
         log(f"❌ [{short_id}] خطأ في التحديث: {e}")
 
@@ -211,13 +215,13 @@ def process_single_item(item, table_name, url_column, title_column):
         if direct_url:
             local_file = download_video_temporarily(direct_url, embed_src, record_id)
             if local_file and os.path.exists(local_file):
-                archive_url = upload_to_archive(local_file, record_id)
+                direct_mp4_url = upload_to_archive(local_file, record_id)
                 
                 if os.path.exists(local_file):
                     os.remove(local_file)
 
-                if archive_url:
-                    update_status(table_name, record_id, archive_url)
+                if direct_mp4_url:
+                    update_status(table_name, record_id, direct_mp4_url)
                     log(f"🎉 [{short_id}] اكتملت العملية بنجاح للفيلم: {title}\n")
                     return True
                 
