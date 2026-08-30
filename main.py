@@ -1,5 +1,6 @@
 import os
 import time
+import subprocess
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
@@ -15,7 +16,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ACCESS_KEY = os.environ.get("IA_ACCESS_KEY")
 SECRET_KEY = os.environ.get("IA_SECRET_KEY")
 
-MAX_CONCURRENT_WORKERS = 3
+# اسم موقعك الذي سيظهر كعلامة مائية جديدة
+WATERMARK_TEXT = "CimaSpace.site"
+
+MAX_CONCURRENT_WORKERS = 2  # تقليل عدد العمال لأن معالجة FFmpeg تستهلك معالج CPU
 log_lock = Lock()
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
@@ -26,6 +30,43 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def log(msg):
     with log_lock:
         print(msg, flush=True)
+
+def apply_watermark_with_ffmpeg(input_file, record_id):
+    """تغطية العلامة المائية القديمة وإضافة اسم موقعك باستخدام FFmpeg"""
+    short_id = str(record_id)[:8]
+    output_file = f"watermarked_{record_id}.mp4"
+    log(f"🎨 [{short_id}] جاري معالجة العلامة المائية بالفيديو...")
+
+    # فلتر FFmpeg:
+    # 1. delogo: مسح/تغبيش منطقة العلامة المائية القديمة في أعلى اليسار (x=10, y=10, width=180, height=50)
+    # 2. drawtext: كتابة اسم موقعك بنفس المكان
+    # تنبيه: يمكنك تعديل أبعاد x, y, w, h حسب موقع ومقاس العلامة المائية في فيديوهاتك
+    filter_complex = (
+        f"delogo=x=10:y=10:w=200:h=60,"
+        f"drawtext=text='{WATERMARK_TEXT}':x=15:y=25:fontsize=22:fontcolor=white:"
+        f"box=1:boxcolor=black@0.6:boxborderw=5"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_file,
+        "-vf", filter_complex,
+        "-c:v", "libx264",
+        "-crf", "23",
+        "-preset", "veryfast", # سرعة المعالجة
+        "-c:a", "copy",        # نسخ الصوت بدون إعادة ترميز لتوفير الوقت
+        output_file
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(output_file):
+            log(f"✨ [{short_id}] تمت معالجة العلامة المائية بنجاح!")
+            return output_file
+    except Exception as e:
+        log(f"⚠️ [{short_id}] تعذر تطبيق FFmpeg، سيتم استخدام الملف الأصلي: {e}")
+    
+    return input_file
 
 def get_video_link_with_browser(embed_url, item_id):
     """استخراج رابط الفيديو المباشر عبر Playwright"""
@@ -89,13 +130,12 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل الفيديو وتجهيزه بترميز H.264 / AAC ليعمل على جميع المشغلات"""
+    """تحميل الفيديو المحلي"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
-    log(f"📥 [{short_id}] بدء التحميل السريع جداً...")
+    log(f"📥 [{short_id}] بدء التحميل...")
     
     ydl_opts = {
-        # إجبار التنزيل بصيغ متوافقة مع مشغلات التطبيقات (H.264 + AAC)
         'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best',
         'outtmpl': output_path,
         'quiet': True,
@@ -118,10 +158,10 @@ def download_video_temporarily(video_url, embed_url, record_id):
         if os.path.exists(output_path):
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
             if file_size_mb > 2:
-                log(f"📦 [{short_id}] اكتمل التحميل المحلي بنجاح ({file_size_mb:.1f} MB)")
+                log(f"📦 [{short_id}] اكتمل التحميل المحلي ({file_size_mb:.1f} MB)")
                 return output_path
             else:
-                log(f"⚠️ [{short_id}] الملف غير صالح (أقل من 2MB)")
+                log(f"⚠️ [{short_id}] الملف غير صالح")
                 if os.path.exists(output_path):
                     os.remove(output_path)
     except Exception as e:
@@ -131,22 +171,23 @@ def download_video_temporarily(video_url, embed_url, record_id):
             
     return None
 
-def upload_to_archive(file_path, record_id):
-    """رفع الملف إلى Archive.org وتوليد رابط MP4 مباشر بدلاً من Embed"""
+def upload_to_archive(file_path, record_id, video_title="Movie"):
+    """رفع الملف لـ Archive وإرجاع رابط MP4 مباشر"""
     short_id = str(record_id)[:8]
     identifier = f"cimaspace-item-{record_id}"
     target_filename = f"{identifier}.mp4"
     log(f"🚀 [{short_id}] جاري الرفع لـ Archive...")
     
+    display_title = f"{video_title} - CimaSpace"
+
     metadata = {
         'mediatype': 'movies',
         'collection': 'opensource_movies',
-        'title': f"Media Item {record_id}",
-        'description': 'CimaSpace Video Stream'
+        'title': display_title,
+        'description': f'Watch {video_title} on CimaSpace'
     }
 
     try:
-        # رفع الملف وتسميته برقم المعرف لتوليد رابط MP4 ثابت وسهل التنبؤ به
         r = ia.upload(
             identifier,
             files={target_filename: file_path},
@@ -158,9 +199,8 @@ def upload_to_archive(file_path, record_id):
         )
         
         if r and r[0].status_code == 200:
-            # رابط الـ MP4 المباشر المخزن بالسيرفر (صالح للتشغيل المباشر داخل التطبيقات)
             direct_mp4_url = f"https://archive.org/download/{identifier}/{target_filename}"
-            log(f"✅ [{short_id}] تم الرفع بنجاح! رابط MP4 المباشر: {direct_mp4_url}")
+            log(f"✅ [{short_id}] تم الرفع بنجاح! الرابط: {direct_mp4_url}")
             return direct_mp4_url
         else:
             log(f"⚠️ [{short_id}] فشل استجابة الأرشيف")
@@ -170,14 +210,14 @@ def upload_to_archive(file_path, record_id):
         return None
 
 def update_status(table_name, record_id, direct_mp4_url):
-    """تحديث رابط MP4 المباشر وحالة الفيلم في Supabase"""
+    """تحديث رابط MP4 وحالة الفيلم في Supabase"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
             "is_uploaded": True,
             "watch_url": direct_mp4_url
         }).eq("id", record_id).execute()
-        log(f"✨ [{short_id}] تم تحديث Supabase برابط MP4!")
+        log(f"✨ [{short_id}] تم تحديث Supabase!")
     except Exception as e:
         log(f"❌ [{short_id}] خطأ في التحديث: {e}")
 
@@ -187,7 +227,7 @@ def process_single_item(item, table_name, url_column, title_column):
         return False
         
     short_id = str(record_id)[:8]
-    title = item.get(title_column) or "Unnamed Video"
+    title = item.get(title_column) or "CimaSpace Video"
     main_watch_url = item.get(url_column)
     direct_links_json = item.get("direct_links") or {}
     
@@ -215,10 +255,18 @@ def process_single_item(item, table_name, url_column, title_column):
         if direct_url:
             local_file = download_video_temporarily(direct_url, embed_src, record_id)
             if local_file and os.path.exists(local_file):
-                direct_mp4_url = upload_to_archive(local_file, record_id)
                 
+                # 1. تطبيق FFmpeg لتغطية العلامة المائية القديمة وطباعة اسم موقعك
+                processed_file = apply_watermark_with_ffmpeg(local_file, record_id)
+                
+                # 2. رفع الملف النهائي
+                direct_mp4_url = upload_to_archive(processed_file, record_id, video_title=title)
+                
+                # 3. تنظيف الملفات المؤقتة
                 if os.path.exists(local_file):
                     os.remove(local_file)
+                if processed_file != local_file and os.path.exists(processed_file):
+                    os.remove(processed_file)
 
                 if direct_mp4_url:
                     update_status(table_name, record_id, direct_mp4_url)
@@ -261,7 +309,7 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
 def main():
     process_table_parallel("movies_cima", "watch_url", "title", limit=10)
     process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
-    process_table_parallel("tv_series", "watch_url", "title", limit=10)
+    process_table_parallel("tv_series", "watch_url", "title", filter_column="is_uploaded", limit=10)
     process_table_parallel("episodes_cima", "watch_url", "title", limit=10)
     
     log("\n🏁 انتهت كل العمليات!")
