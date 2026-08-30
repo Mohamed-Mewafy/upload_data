@@ -98,6 +98,8 @@ async def process_movie(movie):
 
     if not embed_links:
         print(f"⚠️ لا توجد روابط مفرغة للفيلم: {title}", flush=True)
+        # علم الفيلم كـ failed لعدم تكرار جلب الفيلم
+        supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
         return
 
     direct_source_url = None
@@ -110,6 +112,7 @@ async def process_movie(movie):
 
     if not direct_source_url:
         print(f"❌ فشل استخراج رابط الفيديو المباشر لجميع السيرفرات المتاحة.", flush=True)
+        supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
         return
 
     clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '_')).rstrip()
@@ -121,14 +124,13 @@ async def process_movie(movie):
         download_success = download_video(direct_source_url, temp_path)
         if not download_success or not os.path.exists(temp_path):
             print(f"❌ فشل تحميل ملف الفيديو.", flush=True)
+            supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
             return
 
         direct_archive_mp4 = upload_to_archive(temp_path, identifier, title)
 
         if direct_archive_mp4:
             print(f"🎉 تم الرفع بنجاح! الرابط المباشر: {direct_archive_mp4}", flush=True)
-
-            # التحديث باستخدام اسم العمود الصحيح watch_url
             supabase.table("movies_cima").update({
                 "watch_url": direct_archive_mp4,
                 "status": "completed"
@@ -136,6 +138,7 @@ async def process_movie(movie):
             print(f"💾 تم تحديث Supabase بنجاح.", flush=True)
         else:
             print(f"❌ فشلت عملية الرفع لـ Internet Archive.", flush=True)
+            supabase.table("movies_cima").update({"watch_url": "failed"}).eq("id", movie_id).execute()
 
     finally:
         if os.path.exists(temp_path):
@@ -149,18 +152,19 @@ async def main():
 
     while True:
         try:
-            # استعلام يعتمد على العمود watch_url
+            # جلب الصفوف التي لا تحتوي على رابط watch_url وليست failed
             response = (
                 supabase.table("movies_cima")
                 .select("*")
                 .is_("watch_url", "null")
+                .neq("watch_url", "failed")
                 .limit(5)
                 .execute()
             )
             movies = response.data
 
             if not movies:
-                print("✨ لا توجد أفلام معلقة بانتظار المعالجة.", flush=True)
+                print("✨ انتهت جميع الأفلام المعلقة بانتظار المعالجة.", flush=True)
                 break
 
             print(f"\n📦 تم جلب دفعة جديدة تحتوي على {len(movies)} أفلام...", flush=True)
