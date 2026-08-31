@@ -17,7 +17,10 @@ VK_ACCESS_TOKEN = os.environ.get("VK_ACCESS_TOKEN")
 MAX_CONCURRENT_WORKERS = 4
 log_lock = Lock()
 processed_ids_lock = Lock()
+albums_cache_lock = Lock()
+
 in_memory_locked_ids = set()
+albums_cache = {}  # تخزين معرفات الألبومات لتجنب إنشائها مكرراً
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
     raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}")
@@ -52,6 +55,98 @@ def unlock_record_on_failure(table_name, record_id):
         supabase.table(table_name).update({"is_processing": False}).eq("id", record_id).execute()
     except Exception:
         pass
+
+# ==========================================
+# 🧠 الذكاء الأول: الفحص والتصنيف في VK
+# ==========================================
+
+def check_if_video_exists_in_vk(record_id):
+    """التحقق الذكي: البحث عن الفيديو في حساب VK بواسطة الـ UUID"""
+    url = "https://api.vk.com/method/video.search"
+    params = {
+        "q": str(record_id),
+        "search_own": 1,  # البحث داخل مكتبتك فقط
+        "access_token": VK_ACCESS_TOKEN,
+        "v": "5.131"
+    }
+    try:
+        res = requests.post(url, data=params, timeout=10).json()
+        items = res.get("response", {}).get("items", [])
+        
+        for item in items:
+            # التأكد من طابق وصف الفيديو مع الـ UUID بالضبط
+            if str(record_id) in item.get("description", "") or str(record_id) in item.get("title", ""):
+                owner_id = item.get("owner_id")
+                video_id = item.get("id")
+                
+                files = item.get("files", {})
+                direct_stream = (
+                    files.get("hls") or 
+                    files.get("mp4_1080") or 
+                    files.get("mp4_720") or 
+                    files.get("mp4_480") or 
+                    files.get("mp4_360")
+                )
+                
+                if direct_stream:
+                    return direct_stream
+                else:
+                    access_key = item.get("access_key", "")
+                    hash_param = f"&hash={access_key}" if access_key else ""
+                    return f"https://vk.ru/video_ext.php?oid={owner_id}&id={video_id}{hash_param}"
+    except Exception as e:
+        log(f"⚠️ خطأ أثناء فحص وجود الفيديو في VK: {e}")
+        
+    return None
+
+def get_or_create_vk_album(album_title):
+    """جلب أو إنشاء ألبوم/قسم مخصص للقسم (مثل: الأفلام، المسلسلات)"""
+    with albums_cache_lock:
+        if album_title in albums_cache:
+            return albums_cache[album_title]
+
+    # 1. البحث عن الألبوم إذا كان موجوداً بالفعل
+    get_url = "https://api.vk.com/method/video.getAlbums"
+    params = {
+        "need_system": 0,
+        "access_token": VK_ACCESS_TOKEN,
+        "v": "5.131"
+    }
+    try:
+        res = requests.post(get_url, data=params, timeout=10).json()
+        albums = res.get("response", {}).get("items", [])
+        for alb in albums:
+            if alb.get("title") == album_title:
+                with albums_cache_lock:
+                    albums_cache[album_title] = alb.get("id")
+                return alb.get("id")
+    except Exception:
+        pass
+
+    # 2. إنشاء الألبوم في حال عدم وجوده
+    add_url = "https://api.vk.com/method/video.addAlbum"
+    params = {
+        "title": album_title,
+        "privacy": "0",
+        "access_token": VK_ACCESS_TOKEN,
+        "v": "5.131"
+    }
+    try:
+        res = requests.post(add_url, data=params, timeout=10).json()
+        album_id = res.get("response", {}).get("album_id")
+        if album_id:
+            with albums_cache_lock:
+                albums_cache[album_title] = album_id
+            log(f"📁 تم إنشاء ألبوم جديد في VK: [{album_title}] (ID: {album_id})")
+            return album_id
+    except Exception as e:
+        log(f"❌ خطأ في إنشاء ألبوم VK: {e}")
+
+    return None
+
+# ==========================================
+# 🌐 محرك الاستخراج والتحميل
+# ==========================================
 
 def get_video_link_with_browser(embed_url, item_id):
     """استخراج رابط الفيديو المباشر عبر Playwright"""
@@ -117,7 +212,7 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل سريع ومؤقت لنقل الملف إلى VK مع حل مشكلة HTTP 522"""
+    """تحميل سريع ومؤقت لنقل الملف إلى VK"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل السريع...")
@@ -128,7 +223,6 @@ def download_video_temporarily(video_url, embed_url, record_id):
         "Referer": embed_url if embed_url else "https://google.com/",
     }
 
-    # 1. المحاولة عبر طلب Stream مباشر
     try:
         with requests.get(video_url, headers=headers, stream=True, timeout=15) as r:
             if r.status_code == 200:
@@ -142,7 +236,6 @@ def download_video_temporarily(video_url, embed_url, record_id):
     except Exception:
         pass
 
-    # 2. المحاولة عبر yt-dlp بدون طلبات متوازية تفادياً لحظر HTTP 522
     ydl_opts = {
         'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best',
         'outtmpl': output_path,
@@ -178,7 +271,7 @@ def download_video_temporarily(video_url, embed_url, record_id):
     return None
 
 def get_vk_direct_stream_url(owner_id, video_id, retries=8, delay=3):
-    """جلب رابط Stream المباشر من VK مع الانتظار لحين اكتمال معالجة الفيديو"""
+    """جلب رابط Stream المباشر من VK"""
     url = "https://api.vk.com/method/video.get"
     params = {
         "videos": f"{owner_id}_{video_id}",
@@ -209,13 +302,15 @@ def get_vk_direct_stream_url(owner_id, video_id, retries=8, delay=3):
             
     return None
 
-def upload_to_vk(file_path, record_id):
-    """رفع الملف مباشرة إلى VK"""
+def upload_to_vk(file_path, record_id, category_name="General"):
+    """رفع الملف وتصنيفه داخل قسمه المحدد"""
     short_id = str(record_id)[:8]
     display_title = str(record_id)
     description = f"UUID: {record_id}"
     
-    log(f"🚀 [{short_id}] الحصول على سيرفر الرفع من VK...")
+    album_id = get_or_create_vk_album(category_name)
+    
+    log(f"🚀 [{short_id}] الحصول على سيرفر الرفع من VK قسم [{category_name}]...")
     
     save_url = "https://api.vk.com/method/video.save"
     params = {
@@ -226,6 +321,9 @@ def upload_to_vk(file_path, record_id):
         "access_token": VK_ACCESS_TOKEN,
         "v": "5.131"
     }
+    
+    if album_id:
+        params["album_id"] = album_id
 
     try:
         res = requests.post(save_url, data=params, timeout=15).json()
@@ -287,7 +385,11 @@ def update_status(table_name, record_id, watch_url):
         except Exception as e:
             log(f"❌ [{short_id}] خطأ في التحديث: {e}")
 
-def process_single_item(item, table_name, url_column, title_column):
+# ==========================================
+# ⚙️ معالجة العناصر والتشغيل
+# ==========================================
+
+def process_single_item(item, table_name, url_column, title_column, category_name):
     record_id = item.get("id")
     if not record_id:
         return False
@@ -297,6 +399,15 @@ def process_single_item(item, table_name, url_column, title_column):
 
     short_id = str(record_id)[:8]
     title = item.get(title_column) or str(record_id)
+    
+    # 🧠 الذكاء الأول: الفحص المسبق في مكتبة VK لمنع التكرار
+    log(f"🔍 [{short_id}] فحص وجود الفيديو مسبقاً في VK...")
+    existing_vk_url = check_if_video_exists_in_vk(record_id)
+    if existing_vk_url:
+        log(f"⚡ [{short_id}] تم العثور على الفيديو المرفوع سابقاً في VK! الربط المباشر...")
+        update_status(table_name, record_id, existing_vk_url)
+        return True
+
     main_watch_url = item.get(url_column)
     direct_links_json = item.get("direct_links") or {}
     
@@ -316,7 +427,7 @@ def process_single_item(item, table_name, url_column, title_column):
         unlock_record_on_failure(table_name, record_id)
         return False
 
-    log(f"\n🎬 [{short_id}] بدء المعالجة المباشرة: {title}")
+    log(f"\n🎬 [{short_id}] بدء المعالجة: {title} | القسم: [{category_name}]")
     
     for link_index, current_url in enumerate(urls_to_try, 1):
         log(f"🔗 [{short_id}] تجربة الرابط ({link_index}/{len(urls_to_try)})...")
@@ -326,7 +437,7 @@ def process_single_item(item, table_name, url_column, title_column):
             local_file = download_video_temporarily(direct_url, embed_src, record_id)
             if local_file and os.path.exists(local_file):
                 
-                vk_watch_url = upload_to_vk(local_file, record_id)
+                vk_watch_url = upload_to_vk(local_file, record_id, category_name)
                 
                 if os.path.exists(local_file):
                     os.remove(local_file)
@@ -342,9 +453,9 @@ def process_single_item(item, table_name, url_column, title_column):
     unlock_record_on_failure(table_name, record_id)
     return False
 
-def process_table_parallel(table_name, url_column, title_column="title", limit=200):
+def process_table_parallel(table_name, url_column, title_column="title", category_name="General", limit=200):
     log(f"\n==========================================")
-    log(f"📂 فحص الجدول: {table_name}")
+    log(f"📂 فحص الجدول: {table_name} | القسم: {category_name}")
     log(f"==========================================")
     
     try:
@@ -362,7 +473,7 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=2
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         futures = [
-            executor.submit(process_single_item, item, table_name, url_column, title_column) 
+            executor.submit(process_single_item, item, table_name, url_column, title_column, category_name) 
             for item in valid_items
         ]
         
@@ -373,11 +484,11 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=2
                 log(f"❌ خطأ غير متوقع في المهمة: {e}")
 
 def main():
-    # معالجة 200 فيلم/عنصر في كل دورة تشغيل
-    process_table_parallel("movies_cima", "watch_url", "title", limit=200)
-    process_table_parallel("arabic_movies", "watch_url", "title", limit=50)
-    process_table_parallel("tv_series", "watch_url", "title", limit=50)
-    process_table_parallel("episodes_cima", "watch_url", "title", limit=50)
+    # تقسيم وتنظيم المحتوى مع المسميات الخاصة بكل ألبوم
+    process_table_parallel("movies_cima", "watch_url", "title", category_name="Foreign Movies", limit=100)
+    process_table_parallel("arabic_movies", "watch_url", "title", category_name="Arabic Movies", limit=50)
+    process_table_parallel("tv_series", "watch_url", "title", category_name="TV Series", limit=30)
+    process_table_parallel("episodes_cima", "watch_url", "title", category_name="Episodes", limit=20)
     
     log("\n🏁 انتهت كل العمليات لهذا الشوط!")
 
