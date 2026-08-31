@@ -56,7 +56,7 @@ def unlock_record_on_failure(table_name, record_id):
         pass
 
 def apply_watermark_with_ffmpeg(input_file, record_id):
-    """تغطية العلامة المائية القديمة وإضافة اسم موقعك باستعمال FFmpeg"""
+    """تغطية العلامة المائية القديمة وإضافة اسم الموقع باستعمال FFmpeg"""
     short_id = str(record_id)[:8]
     output_file = f"watermarked_{record_id}.mp4"
     log(f"🎨 [{short_id}] جاري معالجة العلامة المائية...")
@@ -220,8 +220,36 @@ def download_video_temporarily(video_url, embed_url, record_id):
             
     return None
 
+def get_vk_direct_stream_url(owner_id, video_id):
+    """جلب رابط الفيديو المباشر (HLS .m3u8 أو MP4) الموجه للمشغل العادي"""
+    url = "https://api.vk.com/method/video.get"
+    params = {
+        "videos": f"{owner_id}_{video_id}",
+        "access_token": VK_ACCESS_TOKEN,
+        "v": "5.131"
+    }
+    try:
+        # انتظر قليلاً لضمان بدء تحويل الفيديو لدى VK بعد الرفع
+        time.sleep(2)
+        res = requests.post(url, data=params, timeout=10).json()
+        items = res.get("response", {}).get("items", [])
+        if items:
+            files = items[0].get("files", {})
+            # يُفضل رابط HLS (.m3u8)، أو أعلى جودة MP4 متاحة
+            direct_stream = (
+                files.get("hls") or 
+                files.get("mp4_1080") or 
+                files.get("mp4_720") or 
+                files.get("mp4_480") or 
+                files.get("mp4_360")
+            )
+            return direct_stream
+    except Exception as e:
+        log(f"⚠️ خطأ في استخراج الرابط المباشر من VK: {e}")
+    return None
+
 def upload_to_vk(file_path, record_id):
-    """رفع الفيديو إلى VK وتسميته بـ UUID الفيلم حصراً"""
+    """رفع الفيديو إلى VK واستخراج رابط الـ Stream المباشر للمشغل العادي"""
     short_id = str(record_id)[:8]
     display_title = str(record_id)
     description = f"UUID: {record_id}"
@@ -247,7 +275,6 @@ def upload_to_vk(file_path, record_id):
         upload_url = res["response"]["upload_url"]
         owner_id = res["response"]["owner_id"]
         video_id = res["response"]["video_id"]
-        access_key = res["response"].get("access_key", "")
 
         log(f"⬆️ [{short_id}] جاري إرسال الملف إلى سيرفرات VK...")
         
@@ -259,10 +286,19 @@ def upload_to_vk(file_path, record_id):
             ).json()
 
         if upload_res.get("video_id") or upload_res.get("result"):
-            hash_param = f"&hash={access_key}" if access_key else ""
-            embed_player_url = f"https://vk.ru/video_ext.php?oid={owner_id}&id={video_id}{hash_param}"
-            log(f"✅ [{short_id}] تم الرفع إلى VK بنجاح! رابط المشغل: {embed_player_url}")
-            return embed_player_url
+            log(f"🎬 [{short_id}] جاري استخراج رابط Stream المباشر من VK...")
+            direct_stream_url = get_vk_direct_stream_url(owner_id, video_id)
+            
+            # إذا تعذر الحصول على الرابط المباشر فوراً، نضع رابط المشغل الاحتياطي
+            if not direct_stream_url:
+                access_key = res["response"].get("access_key", "")
+                hash_param = f"&hash={access_key}" if access_key else ""
+                direct_stream_url = f"https://vk.ru/video_ext.php?oid={owner_id}&id={video_id}{hash_param}"
+                log(f"⚠️ [{short_id}] لم يتم التوصل لرابط MP4/M3U8 مباشر، استخدام الرابط الاحتياطي.")
+            else:
+                log(f"✅ [{short_id}] تم جلب رابط الـ Stream المباشر بنجاح للمشغل العادي!")
+                
+            return direct_stream_url
         else:
             log(f"⚠️ [{short_id}] استجابة سيرفر الرفع غير مكتملة: {upload_res}")
             return None
@@ -365,7 +401,6 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
         log(f"🎉 لا توجد عناصر جديدة في جدول {table_name}.")
         return
 
-    # استبعاد العناصر المعالجة حالياً بالذاكرة
     valid_items = [item for item in items if item.get("id") and item.get("id") not in in_memory_locked_ids]
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
@@ -381,10 +416,10 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
                 log(f"❌ خطأ غير متوقع في المهمة: {e}")
 
 def main():
-    process_table_parallel("movies_cima", "watch_url", "title", limit=1000)
-    process_table_parallel("arabic_movies", "watch_url", "title", limit=1000)
-    process_table_parallel("tv_series", "watch_url", "title", limit=1000)
-    process_table_parallel("episodes_cima", "watch_url", "title", limit=1000)
+    process_table_parallel("movies_cima", "watch_url", "title", limit=10)
+    process_table_parallel("arabic_movies", "watch_url", "title", limit=10)
+    process_table_parallel("tv_series", "watch_url", "title", limit=10)
+    process_table_parallel("episodes_cima", "watch_url", "title", limit=10)
     
     log("\n🏁 انتهت كل العمليات!")
 
