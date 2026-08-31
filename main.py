@@ -14,7 +14,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 VK_ACCESS_TOKEN = os.environ.get("VK_ACCESS_TOKEN")
 
-MAX_CONCURRENT_WORKERS = 2
+MAX_CONCURRENT_WORKERS = 4
 log_lock = Lock()
 processed_ids_lock = Lock()
 in_memory_locked_ids = set()
@@ -117,7 +117,7 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل سريع ومؤقت لنقل الملف إلى VK"""
+    """تحميل سريع ومؤقت لنقل الملف إلى VK مع حل مشكلة HTTP 522"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل السريع...")
@@ -128,39 +128,34 @@ def download_video_temporarily(video_url, embed_url, record_id):
         "Referer": embed_url if embed_url else "https://google.com/",
     }
 
+    # 1. المحاولة عبر طلب Stream مباشر
     try:
-        head_res = requests.head(video_url, headers=headers, timeout=5, allow_redirects=True)
-        if head_res.status_code == 403:
-            log(f"⚠️ [{short_id}] تم رفض الوصول للرابط (HTTP 403)...")
-            return None
+        with requests.get(video_url, headers=headers, stream=True, timeout=15) as r:
+            if r.status_code == 200:
+                with open(output_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=2 * 1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                if os.path.exists(output_path) and (os.path.getsize(output_path) / (1024 * 1024)) > 2:
+                    log(f"📦 [{short_id}] اكتمل التحميل المباشر بنجاح!")
+                    return output_path
     except Exception:
         pass
 
-    if video_url.endswith(".mp4"):
-        try:
-            with requests.get(video_url, headers=headers, stream=True, timeout=30) as r:
-                if r.status_code == 200:
-                    with open(output_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=2 * 1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
-                    if os.path.exists(output_path) and (os.path.getsize(output_path) / (1024 * 1024)) > 2:
-                        log(f"📦 [{short_id}] اكتمل التحميل المباشر بنجاح!")
-                        return output_path
-        except Exception:
-            pass
-
+    # 2. المحاولة عبر yt-dlp بدون طلبات متوازية تفادياً لحظر HTTP 522
     ydl_opts = {
         'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best',
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
         'noprogress': True,
-        'retries': 10,
-        'fragment_retries': 10,
+        'retries': 3,
+        'fragment_retries': 3,
         'skip_unavailable_fragments': True,
-        'concurrent_fragment_downloads': 5,
-        'http_headers': headers
+        'http_headers': headers,
+        'socket_timeout': 15,
+        'source_address': '0.0.0.0',
+        'ignoreerrors': True,
     }
     
     try:
@@ -170,7 +165,7 @@ def download_video_temporarily(video_url, embed_url, record_id):
         if os.path.exists(output_path):
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
             if file_size_mb > 2:
-                log(f"📦 [{short_id}] اكتمل التحميل السريع ({file_size_mb:.1f} MB)")
+                log(f"📦 [{short_id}] اكتمل التحميل ({file_size_mb:.1f} MB)")
                 return output_path
             else:
                 if os.path.exists(output_path):
@@ -183,7 +178,7 @@ def download_video_temporarily(video_url, embed_url, record_id):
     return None
 
 def get_vk_direct_stream_url(owner_id, video_id, retries=8, delay=3):
-    """جلب رابط Stream المباشر من VK مع إعادة المحاولة لحين انتهاء المعالجة"""
+    """جلب رابط Stream المباشر من VK مع الانتظار لحين اكتمال معالجة الفيديو"""
     url = "https://api.vk.com/method/video.get"
     params = {
         "videos": f"{owner_id}_{video_id}",
@@ -215,7 +210,7 @@ def get_vk_direct_stream_url(owner_id, video_id, retries=8, delay=3):
     return None
 
 def upload_to_vk(file_path, record_id):
-    """رفع الملف مباشرة إلى VK بدون أي تعديل إضافي"""
+    """رفع الملف مباشرة إلى VK"""
     short_id = str(record_id)[:8]
     display_title = str(record_id)
     description = f"UUID: {record_id}"
@@ -347,7 +342,7 @@ def process_single_item(item, table_name, url_column, title_column):
     unlock_record_on_failure(table_name, record_id)
     return False
 
-def process_table_parallel(table_name, url_column, title_column="title", limit=10):
+def process_table_parallel(table_name, url_column, title_column="title", limit=200):
     log(f"\n==========================================")
     log(f"📂 فحص الجدول: {table_name}")
     log(f"==========================================")
@@ -378,12 +373,13 @@ def process_table_parallel(table_name, url_column, title_column="title", limit=1
                 log(f"❌ خطأ غير متوقع في المهمة: {e}")
 
 def main():
+    # معالجة 200 فيلم/عنصر في كل دورة تشغيل
     process_table_parallel("movies_cima", "watch_url", "title", limit=200)
-    process_table_parallel("arabic_movies", "watch_url", "title", limit=200)
-    process_table_parallel("tv_series", "watch_url", "title", limit=200)
-    process_table_parallel("episodes_cima", "watch_url", "title", limit=200)
+    process_table_parallel("arabic_movies", "watch_url", "title", limit=50)
+    process_table_parallel("tv_series", "watch_url", "title", limit=50)
+    process_table_parallel("episodes_cima", "watch_url", "title", limit=50)
     
-    log("\n🏁 انتهت كل العمليات!")
+    log("\n🏁 انتهت كل العمليات لهذا الشوط!")
 
 if __name__ == "__main__":
     main()
