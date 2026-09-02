@@ -1,9 +1,9 @@
 name: CimaSpace Auto Uploader
 
 on:
-  workflow_dispatch: # يتيح لك التشغيل اليدوي بضغطة زر من GitHub
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *' # يعمل تلقائياً كل 6 ساعات
+    - cron: '0 */6 * * *'
 
 jobs:
   run-script:
@@ -17,6 +17,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Update package list
+        run: sudo apt-get update
 
       - name: Install dependencies
         run: |
