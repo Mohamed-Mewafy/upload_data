@@ -7,28 +7,42 @@ import requests
 import yt_dlp
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
+from pyrogram import Client as TelegramClient
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ==========================================
+# ⚙️ المتغيرات البيئية ومفاتيح الاتصال
+# ==========================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-VK_ACCESS_TOKEN = os.environ.get("VK_ACCESS_TOKEN")
 
-MAX_CONCURRENT_WORKERS = 4
+TELEGRAM_API_ID = os.environ.get("TELEGRAM_API_ID", "21631130")
+TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "e0617a3a50796aa895af3a4ba03ba748")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8602724340:AAHum6vJ6hRdQDii5VATwlAoPguWNumvjDs")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1003891077968")
+
+MAX_CONCURRENT_WORKERS = 2  # تقليل عدد العمال لتجنب قيود تليجرام (FloodWait)
 log_lock = Lock()
 processed_ids_lock = Lock()
-albums_cache_lock = Lock()
 
 in_memory_locked_ids = set()
-albums_cache = {}  # تخزين معرفات الألبومات لتجنب إنشائها مكرراً
 
 if not SUPABASE_URL or not SUPABASE_URL.startswith("http"):
     raise ValueError(f"❌ خطأ: رابط Supabase غير صحيح أو فارغ: {SUPABASE_URL}")
 
-if not VK_ACCESS_TOKEN:
-    raise ValueError("❌ خطأ: رمز الوصول VK_ACCESS_TOKEN غير معرف في البيئة.")
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("❌ خطأ: بيانات التليجرام TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID غير معرفة.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# تهيئة عميل تليجرام باستخدام Pyrogram
+tg_app = TelegramClient(
+    "telegram_uploader_bot",
+    api_id=int(TELEGRAM_API_ID),
+    api_hash=TELEGRAM_API_HASH,
+    bot_token=TELEGRAM_BOT_TOKEN
+)
 
 def log(msg):
     with log_lock:
@@ -57,92 +71,38 @@ def unlock_record_on_failure(table_name, record_id):
         pass
 
 # ==========================================
-# 🧠 الذكاء الأول: الفحص والتصنيف في VK
+# ✈️ محرك الرفع إلى Telegram
 # ==========================================
 
-def check_if_video_exists_in_vk(record_id):
-    """التحقق الذكي: البحث عن الفيديو في حساب VK بواسطة الـ UUID"""
-    url = "https://api.vk.com/method/video.search"
-    params = {
-        "q": str(record_id),
-        "search_own": 1,  # البحث داخل مكتبتك فقط
-        "access_token": VK_ACCESS_TOKEN,
-        "v": "5.131"
-    }
+def upload_to_telegram(file_path, record_id, title="Video", category_name="General"):
+    """رفع الفيديو إلى قناة التليجرام واستخراج رابط الرسالة"""
+    short_id = str(record_id)[:8]
+    caption = f"🎬 **{title}**\n📂 القسم: #{category_name.replace(' ', '_')}\n🆔 UUID: `{record_id}`"
+
+    log(f"🚀 [{short_id}] جاري رفع الفيديو إلى التليجرام...")
+
     try:
-        res = requests.post(url, data=params, timeout=10).json()
-        items = res.get("response", {}).get("items", [])
-        
-        for item in items:
-            # التأكد من طابق وصف الفيديو مع الـ UUID بالضبط
-            if str(record_id) in item.get("description", "") or str(record_id) in item.get("title", ""):
-                owner_id = item.get("owner_id")
-                video_id = item.get("id")
-                
-                files = item.get("files", {})
-                direct_stream = (
-                    files.get("hls") or 
-                    files.get("mp4_1080") or 
-                    files.get("mp4_720") or 
-                    files.get("mp4_480") or 
-                    files.get("mp4_360")
-                )
-                
-                if direct_stream:
-                    return direct_stream
-                else:
-                    access_key = item.get("access_key", "")
-                    hash_param = f"&hash={access_key}" if access_key else ""
-                    return f"https://vk.ru/video_ext.php?oid={owner_id}&id={video_id}{hash_param}"
+        with tg_app:
+            msg = tg_app.send_video(
+                chat_id=int(TELEGRAM_CHAT_ID),
+                video=file_path,
+                caption=caption,
+                supports_streaming=True
+            )
+            
+            # بناء رابط الرسالة
+            if msg.link:
+                telegram_url = msg.link
+            else:
+                chat_str = str(TELEGRAM_CHAT_ID).replace("-100", "")
+                telegram_url = f"https://t.me/c/{chat_str}/{msg.id}"
+
+            log(f"✅ [{short_id}] تم الرفع إلى تليجرام بنجاح: {telegram_url}")
+            return telegram_url
+
     except Exception as e:
-        log(f"⚠️ خطأ أثناء فحص وجود الفيديو في VK: {e}")
-        
-    return None
-
-def get_or_create_vk_album(album_title):
-    """جلب أو إنشاء ألبوم/قسم مخصص للقسم (مثل: الأفلام، المسلسلات)"""
-    with albums_cache_lock:
-        if album_title in albums_cache:
-            return albums_cache[album_title]
-
-    # 1. البحث عن الألبوم إذا كان موجوداً بالفعل
-    get_url = "https://api.vk.com/method/video.getAlbums"
-    params = {
-        "need_system": 0,
-        "access_token": VK_ACCESS_TOKEN,
-        "v": "5.131"
-    }
-    try:
-        res = requests.post(get_url, data=params, timeout=10).json()
-        albums = res.get("response", {}).get("items", [])
-        for alb in albums:
-            if alb.get("title") == album_title:
-                with albums_cache_lock:
-                    albums_cache[album_title] = alb.get("id")
-                return alb.get("id")
-    except Exception:
-        pass
-
-    # 2. إنشاء الألبوم في حال عدم وجوده
-    add_url = "https://api.vk.com/method/video.addAlbum"
-    params = {
-        "title": album_title,
-        "privacy": "0",
-        "access_token": VK_ACCESS_TOKEN,
-        "v": "5.131"
-    }
-    try:
-        res = requests.post(add_url, data=params, timeout=10).json()
-        album_id = res.get("response", {}).get("album_id")
-        if album_id:
-            with albums_cache_lock:
-                albums_cache[album_title] = album_id
-            log(f"📁 تم إنشاء ألبوم جديد في VK: [{album_title}] (ID: {album_id})")
-            return album_id
-    except Exception as e:
-        log(f"❌ خطأ في إنشاء ألبوم VK: {e}")
-
-    return None
+        log(f"❌ [{short_id}] خطأ أثناء الرفع إلى Telegram: {e}")
+        return None
 
 # ==========================================
 # 🌐 محرك الاستخراج والتحميل
@@ -154,7 +114,7 @@ def get_video_link_with_browser(embed_url, item_id):
     log(f"🌐 [{short_id}] تجربة الرابط: {embed_url}")
     extracted_url = None
     
-    if any(domain in embed_url.lower() for domain in ["archive.org", "vk.com", "vk.ru"]):
+    if any(domain in embed_url.lower() for domain in ["archive.org", "t.me", "telegram.org"]):
         log(f"⚠️ [{short_id}] تخطي رابط غير صالح أو مكرر: {embed_url}")
         return None, embed_url
 
@@ -180,7 +140,7 @@ def get_video_link_with_browser(embed_url, item_id):
             def check_url(url):
                 nonlocal extracted_url
                 url_lower = url.lower()
-                if any(ext in url_lower for ext in ['.m3u8', '.mp4', 'video/mp4']) and not any(ign in url_lower for ign in ['archive.org', 'vk.com', 'vk.ru', 'chunk', 'ads', 'seg', 'analytics', 'googlevideo']):
+                if any(ext in url_lower for ext in ['.m3u8', '.mp4', 'video/mp4']) and not any(ign in url_lower for ign in ['archive.org', 't.me', 'chunk', 'ads', 'seg', 'analytics', 'googlevideo']):
                     if not extracted_url:
                         extracted_url = url
                         log(f"🎯 [{short_id}] تم صيد الرابط المباشر")
@@ -212,7 +172,7 @@ def get_video_link_with_browser(embed_url, item_id):
     return extracted_url, embed_url
 
 def download_video_temporarily(video_url, embed_url, record_id):
-    """تحميل سريع ومؤقت لنقل الملف إلى VK"""
+    """تحميل سريع ومؤقت لنقل الملف إلى Telegram"""
     short_id = str(record_id)[:8]
     output_path = f"{record_id}.mp4"
     log(f"📥 [{short_id}] بدء التحميل السريع...")
@@ -270,103 +230,8 @@ def download_video_temporarily(video_url, embed_url, record_id):
             
     return None
 
-def get_vk_direct_stream_url(owner_id, video_id, retries=8, delay=3):
-    """جلب رابط Stream المباشر من VK"""
-    url = "https://api.vk.com/method/video.get"
-    params = {
-        "videos": f"{owner_id}_{video_id}",
-        "access_token": VK_ACCESS_TOKEN,
-        "v": "5.131"
-    }
-
-    for attempt in range(1, retries + 1):
-        try:
-            time.sleep(delay)
-            res = requests.post(url, data=params, timeout=10).json()
-            items = res.get("response", {}).get("items", [])
-            
-            if items:
-                files = items[0].get("files", {})
-                direct_stream = (
-                    files.get("hls") or 
-                    files.get("mp4_1080") or 
-                    files.get("mp4_720") or 
-                    files.get("mp4_480") or 
-                    files.get("mp4_360")
-                )
-                if direct_stream:
-                    return direct_stream
-            log(f"⏳ معالجة الفيديو قائمة لدى VK... محاولة ({attempt}/{retries})")
-        except Exception as e:
-            log(f"⚠️ خطأ أثناء استخراج رابط VK: {e}")
-            
-    return None
-
-def upload_to_vk(file_path, record_id, category_name="General"):
-    """رفع الملف وتصنيفه داخل قسمه المحدد"""
-    short_id = str(record_id)[:8]
-    display_title = str(record_id)
-    description = f"UUID: {record_id}"
-    
-    album_id = get_or_create_vk_album(category_name)
-    
-    log(f"🚀 [{short_id}] الحصول على سيرفر الرفع من VK قسم [{category_name}]...")
-    
-    save_url = "https://api.vk.com/method/video.save"
-    params = {
-        "name": display_title,
-        "description": description,
-        "is_private": 0,
-        "wallpost": 0,
-        "access_token": VK_ACCESS_TOKEN,
-        "v": "5.131"
-    }
-    
-    if album_id:
-        params["album_id"] = album_id
-
-    try:
-        res = requests.post(save_url, data=params, timeout=15).json()
-        if "error" in res:
-            log(f"❌ [{short_id}] خطأ VK API: {res['error'].get('error_msg')}")
-            return None
-
-        upload_url = res["response"]["upload_url"]
-        owner_id = res["response"]["owner_id"]
-        video_id = res["response"]["video_id"]
-
-        log(f"⬆️ [{short_id}] جاري نقل الملف مباشرة إلى VK...")
-        
-        with open(file_path, "rb") as f:
-            upload_res = requests.post(
-                upload_url,
-                files={"video_file": f},
-                timeout=1800
-            ).json()
-
-        if upload_res.get("video_id") or upload_res.get("result"):
-            log(f"🎬 [{short_id}] جاري استخراج رابط Stream المباشر من VK...")
-            direct_stream_url = get_vk_direct_stream_url(owner_id, video_id)
-            
-            if not direct_stream_url:
-                access_key = res["response"].get("access_key", "")
-                hash_param = f"&hash={access_key}" if access_key else ""
-                direct_stream_url = f"https://vk.ru/video_ext.php?oid={owner_id}&id={video_id}{hash_param}"
-                log(f"⚠️ [{short_id}] تم تعيين رابط المشغل الاحتياطي.")
-            else:
-                log(f"✅ [{short_id}] تم استخراج رابط الـ Stream المباشر بنجاح!")
-                
-            return direct_stream_url
-        else:
-            log(f"⚠️ [{short_id}] استجابة غير مكتملة من سيرفر الرفع: {upload_res}")
-            return None
-
-    except Exception as e:
-        log(f"❌ [{short_id}] خطأ أثناء الرفع إلى VK: {e}")
-        return None
-
 def update_status(table_name, record_id, watch_url):
-    """تحديث قاعدة البيانات برابط البث المباشر"""
+    """تحديث قاعدة البيانات برابط رسالة التليجرام"""
     short_id = str(record_id)[:8]
     try:
         supabase.table(table_name).update({
@@ -399,14 +264,6 @@ def process_single_item(item, table_name, url_column, title_column, category_nam
 
     short_id = str(record_id)[:8]
     title = item.get(title_column) or str(record_id)
-    
-    # 🧠 الذكاء الأول: الفحص المسبق في مكتبة VK لمنع التكرار
-    log(f"🔍 [{short_id}] فحص وجود الفيديو مسبقاً في VK...")
-    existing_vk_url = check_if_video_exists_in_vk(record_id)
-    if existing_vk_url:
-        log(f"⚡ [{short_id}] تم العثور على الفيديو المرفوع سابقاً في VK! الربط المباشر...")
-        update_status(table_name, record_id, existing_vk_url)
-        return True
 
     main_watch_url = item.get(url_column)
     direct_links_json = item.get("direct_links") or {}
@@ -437,13 +294,14 @@ def process_single_item(item, table_name, url_column, title_column, category_nam
             local_file = download_video_temporarily(direct_url, embed_src, record_id)
             if local_file and os.path.exists(local_file):
                 
-                vk_watch_url = upload_to_vk(local_file, record_id, category_name)
+                # الرفع إلى تليجرام
+                tg_watch_url = upload_to_telegram(local_file, record_id, title=title, category_name=category_name)
                 
                 if os.path.exists(local_file):
                     os.remove(local_file)
 
-                if vk_watch_url:
-                    update_status(table_name, record_id, vk_watch_url)
+                if tg_watch_url:
+                    update_status(table_name, record_id, tg_watch_url)
                     log(f"🎉 [{short_id}] مكتمل بنجاح: {title}\n")
                     return True
                 
@@ -484,7 +342,6 @@ def process_table_parallel(table_name, url_column, title_column="title", categor
                 log(f"❌ خطأ غير متوقع في المهمة: {e}")
 
 def main():
-    # تقسيم وتنظيم المحتوى مع المسميات الخاصة بكل ألبوم
     process_table_parallel("movies_cima", "watch_url", "title", category_name="Foreign Movies", limit=100)
     process_table_parallel("arabic_movies", "watch_url", "title", category_name="Arabic Movies", limit=50)
     process_table_parallel("tv_series", "watch_url", "title", category_name="TV Series", limit=30)
